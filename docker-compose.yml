@@ -1,0 +1,21 @@
+services:
+  api:
+    build: .
+    image: homelitics-api:latest
+    container_name: homelitics-api
+    restart: unless-stopped
+    # Everything comes from .env — which is gitignored AND dockerignored.
+    env_file: .env
+    environment:
+      # Exactly one process may run the sweep, or each raises its own duplicate
+      # follow-up task for the same lead.
+      ENABLE_SCHEDULER: "true"
+    ports:
+      - "8000:8000"
+    healthcheck:
+      # Uses the image's own Python — no curl in the image, by design.
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4).status == 200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s

@@ -1,0 +1,188 @@
+# Real Estate CRM — MVP (university project, 2026-2)
+
+## What this is
+
+A lead-management CRM for real estate agencies. The product is **not** a property
+catalog — the catalog is supporting cast. The product is the funnel: a client
+contacts an agent about a listing, the agent responds, a visit happens, it closes
+or it dies. Every North Star metric is measured on that funnel.
+
+Target metrics (from the backlog):
+- median time to first agent response
+- % of leads with at least one follow-up
+- lead → visit conversion rate
+- % of leads lost within 48h
+- stage-to-stage conversion across the funnel
+
+## Stack
+
+- **Database:** Supabase (managed Postgres). No RLS yet — authorization lives in the API.
+- **API:** FastAPI + SQLAlchemy 2.0 (async) + asyncpg + Pydantic v2.
+- **No event bus.** Kafka was considered and cut. Notifications are sent
+  synchronously in the request that triggers them; inactivity detection is a
+  scheduled job (pg_cron or APScheduler), not an event consumer.
+
+### Supabase connection strings (this trips everyone up)
+
+- **Migrations / seeding / psql:** session pooler, port **5432**
+- **FastAPI runtime:** transaction pooler, port **6543**, and you MUST pass
+  `connect_args={"statement_cache_size": 0}` to `create_async_engine` — transaction
+  mode doesn't support prepared statements and asyncpg uses them by default.
+- Do not use the "Direct connection" string: IPv6-only on the free tier.
+- Free-tier projects pause after 7 days idle. Resume in the dashboard before a demo.
+
+## Repo files
+
+- `schema-2.sql` — full DDL. **Idempotent**: starts with `drop schema ... cascade`,
+  so re-running wipes and recreates. Paste into Supabase SQL Editor and Run.
+  Click "Run without RLS" on the warning popup. Run `scripts/verify_db.py` first —
+  if the live schema has drifted, this file will silently destroy it.
+- `migrations/` — `001_schema.sql` (the baseline) and `002_fixes.sql` (additive;
+  already applied to `homelitics`). `schema-2.sql` is kept equal to 001 + 002.
+- `seed.py` — deterministic synthetic data generator.
+  `python seed.py --scale small --seed 42 --now 2026-08-31T00:00:00Z`
+- `app/` — the FastAPI service. `README.md` covers setup and the EC2 runbook;
+  `docs/DECISIONS.md` records the structural choices and why.
+
+## Schema (21 tables, 4 schemas)
+
+**`pii`** — `person`. Every human lives here exactly once.
+
+**`core`** (19) — `agency`, `agent`, `owner`, `client`, `property`, `listing`,
+`lead`, `lead_stage`, `lead_stage_transition`, `lost_reason`, `lead_lost_detail`,
+`interaction`, `appointment`, `objection`, `visit_feedback`, `follow_up_task`,
+`assignment_audit`, `offer`, `deal`
+
+**`events`** — `property_view` (append-only, one row per listing page view)
+
+**`analytics`** — plain views only: `funnel_daily`, `agent_response_time`,
+`listing_performance`, plus `lead_outcome` and `stage_conversion` (added in
+`002_fixes.sql` for the North Star metrics). Dashboards read from here
+exclusively, never from `core` — which is why **every** one of the five exposes
+`agency_id`; two of them did not until `002_fixes.sql`.
+
+### The four rules that generate the design
+
+1. **Person vs. role.** `agent`, `owner`, `client` are thin rows pointing at
+   `pii.person`. Right-to-erasure = one UPDATE scrubbing the person row; all
+   funnel history survives because facts reference role IDs, not names.
+2. **Property vs. listing.** Property is the physical asset. Listing is the
+   commercial act (SALE or RENT, price, status). One `listing` table with an
+   `operation_type` column — **never** split into separate sale/rent tables.
+3. **Transitions are truth, `current_stage` is a cache.** The app inserts into
+   `lead_stage_transition`; a trigger (`core.sync_lead_stage`) updates
+   `lead.current_stage`. This is the only logic in the schema and it is
+   load-bearing — without it every funnel metric is unmeasurable.
+   The trigger is **guarded** (`002_fixes.sql`): it only writes when the new row
+   is the newest by `changed_at`. Before that it wrote in *insert* order, so a
+   backdated transition corrupted the cache. Out-of-order transitions are still
+   logged; only the cache update is skipped.
+4. **Nothing moves between tables by lifecycle.** A won lead stays in `lead` with
+   `current_stage='WON'` and gains a `deal` row. A lost lead gains a
+   `lead_lost_detail` row. Never a separate "closed leads" table.
+
+### Enforced constraints worth knowing
+
+- `lead` has `UNIQUE (client_id, listing_id)` — this **is** the dedup requirement
+  (HU-01 CA3). On insert conflict, return the existing lead thread rather than
+  creating a duplicate. Don't reimplement dedup in Python; it races.
+- `listing` has `CHECK (min_acceptable_price <= asking_price)`.
+- Money is `numeric(15,2)` everywhere, never float. Timestamps are always `timestamptz`.
+- Value sets are `text` + `CHECK`, not Postgres enums — deliberately, so they're
+  editable with a plain ALTER.
+
+## Deliberate scope cuts (do not "fix" these)
+
+| Cut | Consequence |
+|---|---|
+| Agent availability tables | HU-02 becomes *request a visit* → agent confirms, not *book a free slot*. Availability is a future external service. |
+| Appointment exclusion constraint | Double-booking prevention is FastAPI's job: query `idx_appointment_agent` for overlaps before insert. Removed because `EXCLUDE USING gist` with an inline `tstzrange` isn't IMMUTABLE and won't create. |
+| `consent` table | HU-20 is Won't-this-sprint. Synthetic data ⇒ no data subjects ⇒ no consent obligation during development. |
+| Kafka / event bus | Sync calls + scheduled jobs. `interaction` and `lead_stage_transition` are already append-only event tables, so the event *data model* survives; only the infrastructure is gone. |
+| Materialized views | Plain views. Always fresh, no refresh job. Revisit only if `listing_performance` gets slow. |
+| `updated_at` triggers | The API sets `updated_at` on write. |
+
+Also deferred, additive if needed: `listing_price_history`, `message_template`,
+`notification`, `search_event`.
+
+## The seeder
+
+Two phases. `generate()` builds tuples in memory (no DB), `load()` pushes them —
+so the generator is testable without a connection.
+
+`--scale small` produces: 18 agents, 250 properties/listings, 927 clients,
+1,789 leads, 4,839 transitions, 3,352 interactions, 579 appointments, 111 deals,
+76,801 property views. Generation ~1.2s; load 60–120s (network-bound; views go
+via `COPY`, everything else batched at 1,000 rows).
+
+### Injected ground truth — this is the point
+
+The simulation deliberately encodes causal patterns so analytics work can be
+*validated* rather than assumed. Verified at seed 42:
+
+| Pattern | Expected signal |
+|---|---|
+| 7/18 agents are slow responders | 30.5h vs 2.0h median first response |
+| Slowness causes worse outcomes | 19.3% vs 29.4% lead→visit conversion |
+| 27 listings priced +25% over fair value | 493 vs 285 avg views, but 2.1% vs 6.7% win rate |
+| ~12% abandoned leads | LOST with `NO_RESPONSE`, zero OUTBOUND interactions |
+| ~8% missing emails, 3% duplicate clients with reformatted phones | data-quality test fixtures |
+
+The script prints the exact slow-agent UUIDs at the end — save that block as
+`ground_truth.md`. Dashboard correctness tests assert against it.
+
+### Cleaned (HT-03) — do not reintroduce
+
+- the `if False` cruft in `pairs_seen.add(...)` is gone
+- the objection update uses `execute_values`, not one round trip per row
+- reassignment now updates `lead.agent_id` **and** writes `assignment_audit`, and
+  keeps the target inside the same agency
+- `appointment.status` is derived in a post-pass (COMPLETED only if the lead
+  actually reached VISITED) instead of being hard-coded COMPLETED
+- `--now` pins the simulation clock. The generator is translation-invariant, so
+  this changes no row counts — it shifts every timestamp as a block, which is
+  what makes runs on different days comparable.
+
+## HT-03 — built
+
+FastAPI service in `app/`: routers → services → SQLAlchemy (no repository layer,
+no Alembic — see `docs/DECISIONS.md` §2 and §8). Async engine on the 6543 pooler
+with `statement_cache_size=0`. Supabase JWT auth via JWKS or legacy HS256,
+resolving `sub` → `core.agent.auth_user_id`.
+
+**Authorization is service-layer filtering, not RLS** — forced by the transaction
+pooler, which multiplexes sessions and so makes per-request
+`SET LOCAL request.jwt.claims` leak across requests. Every service call takes an
+`agency_id`. Reasoning in `docs/DECISIONS.md` §1. This is the decision most worth
+understanding before changing anything: a service function that forgets its
+filter leaks across tenants and nothing else catches it.
+
+Endpoints cover all five priorities: create-or-return lead (via the UNIQUE guard,
+201/200), lead board + transitions, interaction timeline, visit request →
+confirm → feedback, `/leads/at-risk` plus an hourly APScheduler sweep, and
+analytics reading `analytics.*` only.
+
+### Database state
+
+**Populated.** ~499,000 rows loaded 2026-08-31 by `scripts/seed_sql.sql`, which
+generates everything server-side and so needs no connection string. Figures and
+cohort definitions are in `docs/ground_truth.md`. 13,000 leads across 6 agencies,
+375,281 property views; all integrity checks zero.
+
+Note the seed-42 numbers quoted above describe **`seed.py`'s** output, not the
+loaded data. Both seeders TRUNCATE first, so running `seed.py` replaces this
+dataset with the smaller reproducible one.
+
+### Outstanding
+
+Blocked on credentials only: `.env` has the two connection strings stubbed as
+`[[DB-PASSWORD]]` / `[[POOLER-HOST]]` — fill them from the Supabase dashboard.
+Until then the API cannot connect, and `pytest` / `scripts/smoke.sh` cannot run.
+Two Supabase Auth users still need binding via `scripts/bind_agents.py`, or every
+authenticated request returns 403. See `README.md` steps 4–5.
+
+## Working style
+
+Be frank and direct. Prefer the simple implementation; if something needs a
+Postgres feature that's fighting back, drop it and handle it in the app. Push
+back on over-engineering. Text explanations over diagrams unless asked.
