@@ -16,7 +16,9 @@ from fastapi.responses import JSONResponse
 from app.config import get_settings
 from app.db import dispose_engine
 from app.jobs import build_scheduler
-from app.routers import analytics, appointments, health, leads, listings
+from app.routers import (
+    analytics, appointments, availability, health, leads, listings,
+)
 
 settings = get_settings()
 logging.basicConfig(
@@ -74,6 +76,7 @@ app = FastAPI(
         {"name": "identity", "description": "Who the current token belongs to."},
         {"name": "leads", "description": "The funnel: board, transitions, timeline, tasks."},
         {"name": "appointments", "description": "Visit requests, confirmation, feedback."},
+        {"name": "availability", "description": "Agent weekly availability, time off, free slots."},
         {"name": "listings", "description": "Catalogue and view events."},
         {"name": "analytics", "description": "Reads the analytics schema only, never core."},
     ],
@@ -100,5 +103,6 @@ app.include_router(health.router)
 app.include_router(leads.router)
 app.include_router(appointments.lead_router)
 app.include_router(appointments.router)
+app.include_router(availability.router)
 app.include_router(listings.router)
 app.include_router(analytics.router)

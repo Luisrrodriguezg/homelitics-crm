@@ -30,8 +30,21 @@ class Settings(BaseSettings):
     enable_scheduler: bool = Field(default=False, alias="ENABLE_SCHEDULER")
     inactivity_hours: int = Field(default=72, alias="INACTIVITY_HOURS")
     scheduler_interval_minutes: int = Field(default=60, alias="SCHEDULER_INTERVAL_MINUTES")
+    # The domain-event outbox relay (jobs.relay_events). Runs on the same
+    # ENABLE_SCHEDULER gate as the inactivity sweep.
+    event_relay_seconds: int = Field(default=30, alias="EVENT_RELAY_SECONDS")
+    # Agents publish availability in local time; slot maths happens in this zone.
+    app_timezone: str = Field(default="America/Bogota", alias="APP_TIMEZONE")
+    # When true, request_visit rejects a slot the agent has not published.
+    # Default false so the existing overlap tests keep their meaning.
+    enforce_availability: bool = Field(default=False, alias="ENFORCE_AVAILABILITY")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     cors_origins: str = Field(default="*", alias="CORS_ORIGINS")
+
+    # --- local dev only ---
+    # Skip Supabase JWT entirely and take the acting agent from X-Dev-Agent-Id.
+    # Guarded in __init__: refused unless DATABASE_URL points at localhost/db.
+    dev_auth_bypass: bool = Field(default=False, alias="DEV_AUTH_BYPASS")
 
     @field_validator("supabase_jwt_secret", mode="before")
     @classmethod
@@ -46,10 +59,25 @@ class Settings(BaseSettings):
         if not v.startswith("postgresql+asyncpg://"):
             raise ValueError(
                 "DATABASE_URL must use the asyncpg driver, e.g. "
-                "postgresql+asyncpg://... — and it must be the TRANSACTION pooler "
-                "(port 6543), not the session pooler (5432) or the direct connection."
+                "postgresql+asyncpg://... — on Supabase it must be the TRANSACTION "
+                "pooler (port 6543), not the session pooler (5432) or the direct "
+                "connection. A local Postgres (localhost/db) is also accepted for "
+                "the docker-compose 'local' profile."
             )
         return v
+
+    @property
+    def _db_host_is_local(self) -> bool:
+        host = self.database_url.split("@", 1)[-1].split("/", 1)[0].split(":", 1)[0]
+        return host in {"localhost", "127.0.0.1", "db"}
+
+    def model_post_init(self, __context) -> None:
+        if self.dev_auth_bypass and not self._db_host_is_local:
+            raise ValueError(
+                "DEV_AUTH_BYPASS is on but DATABASE_URL does not point at a local "
+                "database (localhost/127.0.0.1/db). Refusing to start — this would "
+                "disable authentication against a real database."
+            )
 
     @property
     def supabase_url(self) -> str:

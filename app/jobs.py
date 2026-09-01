@@ -19,8 +19,50 @@ from sqlalchemy import func, or_, select
 from app.config import get_settings
 from app.db import get_sessionmaker
 from app.models import Agent, FollowUpTask, Interaction, Lead, LeadStage
+from app.services import events
 
 log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------- event handlers
+#
+# Registered on import. The relay (events.relay_events) dispatches unpublished
+# outbox rows here. Handlers run in the relay's transaction and must be
+# idempotent — a handler that raises is retried on the next tick.
+
+@events.register("lead.created")
+async def on_lead_created(session, event) -> None:
+    """HU-10 entry point: every new lead gets a first-touch follow-up task."""
+    lead_id = event.aggregate_id
+    exists_pending = (
+        await session.execute(
+            select(FollowUpTask.id).where(
+                FollowUpTask.lead_id == lead_id, FollowUpTask.status == "PENDING"
+            )
+        )
+    ).first()
+    if exists_pending:
+        return
+    agent_id = (
+        await session.execute(select(Lead.agent_id).where(Lead.id == lead_id))
+    ).scalar_one_or_none()
+    if agent_id is None:
+        return
+    session.add(
+        FollowUpTask(
+            lead_id=lead_id,
+            agent_id=agent_id,
+            due_at=datetime.now(timezone.utc) + timedelta(hours=24),
+            note="Auto-raised: first-touch follow-up for a new lead.",
+            status="PENDING",
+        )
+    )
+
+
+async def relay_events() -> int:
+    """Scheduled wrapper around events.relay_events with its own session."""
+    async with get_sessionmaker()() as session:
+        return await events.relay_events(session)
 
 
 async def sweep_inactive_leads() -> int:
@@ -61,6 +103,18 @@ async def sweep_inactive_leads() -> int:
             )
         ).scalars().all()
 
+        agent_agency: dict = {}
+        if stale:
+            agent_agency = dict(
+                (
+                    await session.execute(
+                        select(Agent.id, Agent.agency_id).where(
+                            Agent.id.in_({l.agent_id for l in stale})
+                        )
+                    )
+                ).all()
+            )
+
         now = datetime.now(timezone.utc)
         for lead in stale:
             session.add(
@@ -89,6 +143,14 @@ async def sweep_inactive_leads() -> int:
                     created_by=lead.agent_id,
                 )
             )
+            events.emit(
+                session,
+                event_type="lead.went_cold",
+                aggregate_type="lead",
+                aggregate_id=lead.id,
+                agency_id=agent_agency.get(lead.agent_id),
+                payload={"inactivity_hours": settings.inactivity_hours},
+            )
 
         await session.commit()
 
@@ -112,5 +174,14 @@ def build_scheduler() -> AsyncIOScheduler | None:
         max_instances=1,
         coalesce=True,          # a missed run does not pile up
         misfire_grace_time=300,
+    )
+    scheduler.add_job(
+        relay_events,
+        trigger=IntervalTrigger(seconds=settings.event_relay_seconds),
+        id="event_relay",
+        name="Publish unpublished domain events from the outbox",
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=30,
     )
     return scheduler

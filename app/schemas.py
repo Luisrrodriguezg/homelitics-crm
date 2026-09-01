@@ -7,7 +7,7 @@ ALTER). They are mirrored here as Literals so the API rejects bad values with a
 from __future__ import annotations
 
 import uuid
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Literal
 
@@ -236,6 +236,75 @@ class ListingOut(ORMModel):
 class ViewCreate(BaseModel):
     session_id: str = Field(min_length=1, max_length=200)
     client_id: uuid.UUID | None = None
+
+
+# ------------------------------------------------------------- availability
+
+class AvailabilityCreate(BaseModel):
+    weekday: int = Field(ge=0, le=6, description="0 = Monday .. 6 = Sunday")
+    start_time: time
+    end_time: time
+    valid_from: date = Field(default_factory=lambda: datetime.now().date())
+    valid_to: date | None = None
+
+    @model_validator(mode="after")
+    def _ordered(self):
+        if self.start_time >= self.end_time:
+            raise ValueError("start_time must be before end_time")
+        if self.valid_to is not None and self.valid_to < self.valid_from:
+            raise ValueError("valid_to must not precede valid_from")
+        return self
+
+
+class AvailabilityPatch(BaseModel):
+    weekday: int | None = Field(default=None, ge=0, le=6)
+    start_time: time | None = None
+    end_time: time | None = None
+    valid_from: date | None = None
+    valid_to: date | None = None
+
+    @model_validator(mode="after")
+    def _something_to_do(self):
+        if all(getattr(self, f) is None for f in
+               ("weekday", "start_time", "end_time", "valid_from", "valid_to")):
+            raise ValueError("provide at least one field to change")
+        return self
+
+
+class AvailabilityOut(ORMModel):
+    id: uuid.UUID
+    agent_id: uuid.UUID
+    weekday: int
+    start_time: time
+    end_time: time
+    valid_from: date
+    valid_to: date | None
+
+
+class TimeOffCreate(BaseModel):
+    starts_at: datetime
+    ends_at: datetime
+    reason: str | None = Field(default=None, max_length=500)
+
+    @model_validator(mode="after")
+    def _ordered(self):
+        if self.starts_at >= self.ends_at:
+            raise ValueError("starts_at must be before ends_at")
+        return self
+
+
+class TimeOffOut(ORMModel):
+    id: uuid.UUID
+    agent_id: uuid.UUID
+    starts_at: datetime
+    ends_at: datetime
+    reason: str | None
+
+
+class SlotsOut(BaseModel):
+    agent_id: uuid.UUID
+    slot_minutes: int
+    slots: list[datetime]
 
 
 # ---------------------------------------------------------------- analytics
