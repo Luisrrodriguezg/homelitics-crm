@@ -33,6 +33,8 @@ CORE_TABLES = {
     "lead_stage", "lead_stage_transition", "lost_reason", "lead_lost_detail",
     "interaction", "appointment", "objection", "visit_feedback",
     "follow_up_task", "assignment_audit", "offer", "deal",
+    # from 003_availability.sql
+    "agent_availability", "agent_time_off",
 }
 ANALYTICS_VIEWS = {
     "funnel_daily", "agent_response_time", "listing_performance",
@@ -46,6 +48,9 @@ EXPECTED_INDEXES = {
     # from 002_fixes.sql
     "idx_agent_auth_user_id", "idx_agent_agency", "idx_listing_agent",
     "idx_listing_status", "idx_property_owner", "idx_task_agent_due",
+    # from 003_availability.sql / 004_events_outbox.sql
+    "idx_agent_availability_agent", "idx_agent_time_off_agent",
+    "idx_domain_event_unpublished",
 }
 
 
@@ -89,14 +94,15 @@ def verify_structure(cur):
 
     check("pii has exactly {person}", tables.get("pii") == {"person"},
           str(sorted(tables.get("pii", []))))
-    check("events has exactly {property_view}", tables.get("events") == {"property_view"},
+    check("events has exactly {property_view, domain_event}",
+          tables.get("events") == {"property_view", "domain_event"},
           str(sorted(tables.get("events", []))))
 
     core = tables.get("core", set())
     missing, extra = CORE_TABLES - core, core - CORE_TABLES
-    check(f"core has the 19 expected tables", not missing and not extra,
+    check(f"core has the {len(CORE_TABLES)} expected tables", not missing and not extra,
           f"missing={sorted(missing)} unexpected={sorted(extra)}" if (missing or extra)
-          else "19/19")
+          else f"{len(CORE_TABLES)}/{len(CORE_TABLES)}")
 
     cur.execute("""select table_name from information_schema.tables
                    where table_schema='analytics' and table_type='VIEW'""")
@@ -133,12 +139,24 @@ def verify_structure(cur):
           "unguarded — a backdated transition will corrupt current_stage" if "max(t.changed_at)" not in src else "")
     check("sync_lead_stage has a pinned search_path", "search_path" in src.lower())
 
-    # the reason running without RLS is safe: PostgREST simply cannot reach these schemas
-    leaked = one(cur, """select count(*) from information_schema.role_table_grants
-                         where grantee in ('anon','authenticated')
-                           and table_schema in ('pii','core','events','analytics')""")
-    check("anon/authenticated hold no grants on our schemas", leaked == 0,
-          f"{leaked} grants found — data is reachable via PostgREST" if leaked else "")
+    # The reason running without RLS is safe: PostgREST simply cannot reach these
+    # schemas. The ONE deliberate exception (004_events_outbox.sql) is a SELECT on
+    # events.domain_event for `authenticated`, so Realtime can stream it — and that
+    # table has RLS + an agency policy. Anything else is a real leak.
+    cur.execute("""select table_schema, table_name, privilege_type, grantee
+                   from information_schema.role_table_grants
+                   where grantee in ('anon','authenticated')
+                     and table_schema in ('pii','core','events','analytics')""")
+    grants = cur.fetchall()
+    allowed = {("events", "domain_event", "SELECT", "authenticated")}
+    leaked = [g for g in grants if tuple(g) not in allowed]
+    check("no grants on our schemas beyond the Realtime SELECT on domain_event",
+          not leaked, f"unexpected grants: {leaked}" if leaked else "")
+
+    rls_on = one(cur, """select relrowsecurity from pg_class c
+                         join pg_namespace n on n.oid = c.relnamespace
+                         where n.nspname='events' and c.relname='domain_event'""")
+    check("events.domain_event has RLS enabled", rls_on is True)
 
 
 # ---------------------------------------------------------------- data

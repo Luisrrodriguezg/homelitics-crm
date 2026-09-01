@@ -409,3 +409,102 @@ select agency_id,
            lag(leads_reached) over (partition by agency_id order by sort_order), 0), 2)
        end as pct_from_prev
 from counts;
+
+-- ============================================================
+-- 003_availability.sql — HU-05 agent availability
+-- ============================================================
+
+create table if not exists core.agent_availability (
+  id         uuid primary key default gen_random_uuid(),
+  agent_id   uuid not null references core.agent(id) on delete cascade,
+  weekday    smallint not null check (weekday between 0 and 6),
+  start_time time not null,
+  end_time   time not null,
+  valid_from date not null default current_date,
+  valid_to   date,
+  created_at timestamptz not null default now(),
+  check (start_time < end_time),
+  check (valid_to is null or valid_to >= valid_from)
+);
+
+create table if not exists core.agent_time_off (
+  id         uuid primary key default gen_random_uuid(),
+  agent_id   uuid not null references core.agent(id) on delete cascade,
+  starts_at  timestamptz not null,
+  ends_at    timestamptz not null,
+  reason     text,
+  created_at timestamptz not null default now(),
+  check (starts_at < ends_at)
+);
+
+create index if not exists idx_agent_availability_agent
+  on core.agent_availability (agent_id, weekday);
+create index if not exists idx_agent_time_off_agent
+  on core.agent_time_off (agent_id, starts_at, ends_at);
+
+-- ============================================================
+-- 004_events_outbox.sql — domain-event outbox + surgical Realtime grant
+-- ============================================================
+
+create table if not exists events.domain_event (
+  id             bigint generated always as identity primary key,
+  event_type     text not null,
+  aggregate_type text not null,
+  aggregate_id   uuid not null,
+  agency_id      uuid not null,
+  payload        jsonb not null default '{}',
+  occurred_at    timestamptz not null default now(),
+  published_at   timestamptz,
+  attempts       integer not null default 0
+);
+
+create index if not exists idx_domain_event_unpublished
+  on events.domain_event (occurred_at)
+  where published_at is null;
+
+do $$
+begin
+  if exists (select 1 from information_schema.schemata where schema_name = 'auth') then
+
+    create or replace function core.current_agency_id() returns uuid
+    language sql
+    stable
+    security definer
+    set search_path = ''
+    as $fn$
+      select a.agency_id
+      from core.agent a
+      where a.auth_user_id = auth.uid()
+      limit 1
+    $fn$;
+
+    revoke execute on function core.current_agency_id() from public, anon;
+    grant execute on function core.current_agency_id() to authenticated;
+
+    grant usage on schema events to authenticated;
+    grant select on events.domain_event to authenticated;
+
+    execute 'alter table events.domain_event enable row level security';
+
+    if not exists (
+      select 1 from pg_policies
+      where schemaname = 'events' and tablename = 'domain_event'
+        and policyname = 'domain_event_own_agency'
+    ) then
+      execute $pol$
+        create policy domain_event_own_agency on events.domain_event
+          for select to authenticated
+          using (agency_id = core.current_agency_id())
+      $pol$;
+    end if;
+
+    if not exists (
+      select 1 from pg_publication_tables
+      where pubname = 'supabase_realtime'
+        and schemaname = 'events' and tablename = 'domain_event'
+    ) then
+      execute 'alter publication supabase_realtime add table events.domain_event';
+    end if;
+
+  end if;
+end $$;
