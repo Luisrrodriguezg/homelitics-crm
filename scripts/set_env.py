@@ -114,10 +114,21 @@ def main():
 
     lines = read_env()
 
-    print("Supabase dashboard -> your project -> Settings -> Database -> Connection string")
-    print("Both pooler tabs show the SAME host. Copy just the host, e.g.")
-    print("    aws-1-us-west-2.pooler.supabase.com\n")
-    host = input("Pooler host: ").strip()
+    current = ""
+    for ln in lines:
+        m = re.match(r"^DATABASE_URL=.*?@([^:]+):", ln)
+        if m and "[[" not in m.group(1):
+            current = m.group(1)
+            break
+
+    if current:
+        print(f"Pooler host already set to: {current}")
+        host = input("Pooler host [Enter to keep]: ").strip() or current
+    else:
+        print("Dashboard -> your project -> the green Connect button (top bar)")
+        print("  -> Session pooler / Transaction pooler tab. Copy just the host, e.g.")
+        print("    aws-0-us-west-2.pooler.supabase.com\n")
+        host = input("Pooler host: ").strip()
     if not host:
         sys.exit("no host given")
     host = host.split("@")[-1].split(":")[0].strip("/")   # tolerate a pasted full URI
