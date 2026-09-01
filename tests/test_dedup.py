@@ -18,10 +18,10 @@ async def test_same_pair_returns_existing_thread(world, client_for):
         "message": "Interested",
     }
 
-    first = c.post("/leads", json=body)
+    first = await c.post("/leads", json=body)
     assert first.status_code == 201, first.text
 
-    second = c.post("/leads", json=body)
+    second = await c.post("/leads", json=body)
     assert second.status_code == 200, second.text
     assert second.json()["id"] == first.json()["id"]
 
@@ -37,9 +37,9 @@ async def test_concurrent_posts_produce_one_lead(world, client_for):
         "source_channel": "IN_APP",
     }
 
-    results = await asyncio.gather(
-        *[asyncio.to_thread(c.post, "/leads", json=body) for _ in range(6)]
-    )
+    # Real concurrency on one loop: six requests interleave at their await
+    # points, each on its own DB session, so the UNIQUE race is genuine.
+    results = await asyncio.gather(*[c.post("/leads", json=body) for _ in range(6)])
     codes = sorted(r.status_code for r in results)
     ids = {r.json()["id"] for r in results}
 
@@ -52,7 +52,7 @@ async def test_opening_transition_and_stage_cache(world, client_for):
     """The trigger must set current_stage from the opening transition."""
     agent = world.agents[0][0]
     c = client_for(agent)
-    r = c.post("/leads", json={
+    r = await c.post("/leads", json={
         "client_id": str(world.clients[0].id),
         "listing_id": str(world.listings[0].id),
         "source_channel": "CALL",
@@ -60,6 +60,6 @@ async def test_opening_transition_and_stage_cache(world, client_for):
     lead_id = r.json()["id"]
     assert r.json()["current_stage"] == "INTERESTED"
 
-    hist = c.get(f"/leads/{lead_id}/transitions").json()
+    hist = (await c.get(f"/leads/{lead_id}/transitions")).json()
     assert [t["to_stage"] for t in hist] == ["INTERESTED"]
     assert hist[0]["from_stage"] is None

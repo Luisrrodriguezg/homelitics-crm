@@ -88,10 +88,14 @@ def test_connection():
         try:
             conn = psycopg2.connect(probe, connect_timeout=10)
             cur = conn.cursor()
-            cur.execute("select current_database(), inet_server_port(), count(*) from core.lead")
-            db, port, leads = cur.fetchone()
+            cur.execute("select current_database(), count(*) from core.lead")
+            db, leads = cur.fetchone()
             conn.close()
-            print(f"  PASS  {key}  connected  db={db} port={port} leads={leads}")
+            # NB: report the port from the URL, not inet_server_port(). The latter
+            # returns the backend's port (always 5432) no matter which pooler you
+            # came through, which makes a correct 6543 config look wrong.
+            port = probe.rsplit(":", 1)[-1].split("/")[0]
+            print(f"  PASS  {key:22} connected via port {port}  db={db} leads={leads}")
         except Exception as exc:
             first = str(exc).strip().splitlines()[0]
             print(f"  FAIL  {key}  {first}")

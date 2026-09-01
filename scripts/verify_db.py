@@ -22,6 +22,7 @@ Exit code 0 = all checks passed, 1 = at least one failed.
 import argparse
 import os
 import sys
+from pathlib import Path
 
 import psycopg2
 
@@ -46,6 +47,18 @@ EXPECTED_INDEXES = {
     "idx_agent_auth_user_id", "idx_agent_agency", "idx_listing_agent",
     "idx_listing_status", "idx_property_owner", "idx_task_agent_due",
 }
+
+
+def _load_dotenv() -> None:
+    """Load .env from the project root, so these scripts work the way the README
+    says they do. Without this they only see variables already exported in the
+    shell, which is not how anyone actually runs them."""
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        return
+    load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+
 
 results = []
 
@@ -197,15 +210,26 @@ def verify_data(cur):
         check("two responder cohorts detectable", False,
               f"found {len(rows)} cohort(s) — expected fast and slow")
 
+    # "Overpriced" has to be judged WITHIN a neighbourhood. Ranking on raw
+    # price/m2 across the whole city just selects the premium neighbourhoods,
+    # which says nothing about whether a listing is mispriced for where it is.
     cur.execute("""
-        select round(avg(views), 0), round(100.0*avg(case when won>0 then 1 else 0 end), 1),
-               (asking_price / nullif(area_m2, 0)) > pct.cut
-        from analytics.listing_performance lp
-        join core.listing li on li.id = lp.listing_id
-        join core.property p on p.id = li.property_id
-        cross join (select percentile_cont(0.85) within group
-                      (order by li2.asking_price / nullif(p2.area_m2,0)) as cut
-                    from core.listing li2 join core.property p2 on p2.id = li2.property_id) pct
+        with ppm as (
+          select lp.listing_id, lp.views, lp.won, p.neighborhood,
+                 li.asking_price / nullif(p.area_m2, 0) as price_m2
+          from analytics.listing_performance lp
+          join core.listing li on li.id = lp.listing_id
+          join core.property p on p.id = li.property_id
+        ),
+        med as (
+          select neighborhood,
+                 percentile_cont(0.5) within group (order by price_m2) as mid
+          from ppm group by neighborhood
+        )
+        select round(avg(ppm.views), 0),
+               round(100.0*avg(case when ppm.won > 0 then 1 else 0 end), 1),
+               (ppm.price_m2 > med.mid * 1.15) as overpriced
+        from ppm join med on med.neighborhood = ppm.neighborhood
         group by 3 order by 3""")
     rows = cur.fetchall()
     if len(rows) == 2:
@@ -225,6 +249,8 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--url", help="Postgres URI (default: $DATABASE_URL_MIGRATE, then $DATABASE_URL)")
     args = ap.parse_args()
+
+    _load_dotenv()
 
     url = args.url or os.environ.get("DATABASE_URL_MIGRATE") or os.environ.get("DATABASE_URL")
     if not url:

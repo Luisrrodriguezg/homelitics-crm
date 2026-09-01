@@ -35,6 +35,24 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(skip)
 
 
+@pytest_asyncio.fixture(autouse=True)
+async def _fresh_engine_per_test():
+    """Dispose the engine after every test.
+
+    pytest-asyncio gives each test its own event loop, but app.db caches the
+    engine with lru_cache. Without this, test 2 borrows a pooled asyncpg
+    connection that was opened on test 1's loop and everything downstream dies
+    with "attached to a different loop". Autouse and declared first, so it tears
+    down last -- after the fixtures that still need a working session.
+    """
+    yield
+    from app.db import get_engine, get_sessionmaker
+    if get_engine.cache_info().currsize:
+        await get_engine().dispose()
+    get_engine.cache_clear()
+    get_sessionmaker.cache_clear()
+
+
 @pytest_asyncio.fixture
 async def session():
     from app.db import get_sessionmaker
@@ -164,16 +182,61 @@ def get_new_session():
     return get_sessionmaker()()
 
 
-@pytest.fixture
-def client_for():
-    """Build a TestClient acting as a given agent."""
-    from fastapi.testclient import TestClient
+@pytest_asyncio.fixture
+async def client_for():
+    """Build an AsyncClient acting as a given agent.
+
+    httpx + ASGITransport rather than TestClient: TestClient drives the app
+    through a blocking portal on its OWN event loop, while these fixtures run on
+    pytest-asyncio's. Sharing one asyncpg pool across two loops fails with
+    "attached to a different loop". Going async keeps everything on one loop.
+
+    Identity travels in a header rather than a captured closure, so several
+    clients can coexist -- overwriting one global override would silently make
+    every client act as whichever agent was registered last, which is exactly
+    the bug the cross-tenant tests are supposed to catch.
+    """
+    from fastapi import Header, HTTPException
+    from httpx import ASGITransport, AsyncClient
+    from sqlalchemy import select
+    from sqlalchemy.orm import joinedload
+
+    from app.db import get_sessionmaker
     from app.deps import get_current_agent
     from app.main import app
+    from app.models import Agent
+
+    # NB: annotate with plain `str`, not `Request`. This module uses
+    # `from __future__ import annotations`, so FastAPI resolves annotations from
+    # MODULE globals -- a name imported inside this fixture is invisible to it,
+    # and the parameter silently degrades into a required query param (422
+    # "field required: query.request"). `str` is a builtin, so it always resolves.
+    async def _agent_from_header(x_test_agent_id: str = Header(default="")):
+        raw = x_test_agent_id
+        if not raw:
+            raise HTTPException(401, "test client sent no agent header")
+        async with get_sessionmaker()() as s:
+            agent = (
+                await s.execute(
+                    select(Agent).options(joinedload(Agent.person))
+                    .where(Agent.id == uuid.UUID(raw))
+                )
+            ).scalar_one_or_none()
+        if agent is None:
+            raise HTTPException(403, "unknown test agent")
+        return agent
+
+    app.dependency_overrides[get_current_agent] = _agent_from_header
+    opened = []
 
     def _make(agent):
-        app.dependency_overrides[get_current_agent] = lambda: agent
-        return TestClient(app)
+        c = AsyncClient(transport=ASGITransport(app=app), base_url="http://test",
+                        headers={"X-Test-Agent-Id": str(agent.id)}, timeout=30.0)
+        opened.append(c)
+        return c
 
     yield _make
+
+    for c in opened:
+        await c.aclose()
     app.dependency_overrides.clear()

@@ -31,9 +31,21 @@ import argparse
 import os
 import sys
 import uuid
+from pathlib import Path
 
 import psycopg2
 import psycopg2.extras
+
+def _load_dotenv() -> None:
+    """Load .env from the project root, so these scripts work the way the README
+    says they do. Without this they only see variables already exported in the
+    shell, which is not how anyone actually runs them."""
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        return
+    load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+
 
 SLOWEST_IN_AGENCY = """
     select a.id, p.full_name, a.role, a.agency_id, a.auth_user_id,
@@ -68,6 +80,8 @@ def main() -> int:
                     help="Clear every auth_user_id and exit")
     ap.add_argument("--url", help="Postgres URI (default $DATABASE_URL_MIGRATE)")
     args = ap.parse_args()
+
+    _load_dotenv()
 
     url = args.url or os.environ.get("DATABASE_URL_MIGRATE") or os.environ.get("DATABASE_URL")
     if not url:
