@@ -21,6 +21,7 @@ from app.models import (
     LeadLostDetail, LeadStage, LeadStageTransition, Listing, LostReason,
 )
 from app.schemas import ALLOWED_TRANSITIONS, TERMINAL_STAGES
+from app.services import events
 
 
 def _agency_scope() -> Select:
@@ -108,6 +109,16 @@ async def create_or_get_lead(
                 body=message,
             )
         )
+    # Outbox row in the same transaction: the event exists iff the lead does.
+    events.emit(
+        session,
+        event_type="lead.created",
+        aggregate_type="lead",
+        aggregate_id=new_id,
+        agency_id=agency_id,
+        payload={"listing_id": str(listing_id), "client_id": str(client_id),
+                 "agent_id": str(listing.agent_id)},
+    )
     await session.commit()
 
     lead = (await session.execute(select(Lead).where(Lead.id == new_id))).scalar_one()
@@ -189,6 +200,15 @@ async def add_transition(
                 type="STATUS_CHANGE", body=note, created_by=agent.id,
             )
         )
+
+    events.emit(
+        session,
+        event_type="lead.stage_changed",
+        aggregate_type="lead",
+        aggregate_id=lead_id,
+        agency_id=agent.agency_id,
+        payload={"from": current, "to": to_stage},
+    )
 
     await session.commit()
     await session.refresh(transition)

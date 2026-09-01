@@ -7,11 +7,14 @@ layer rather than in RLS.
 """
 from __future__ import annotations
 
+import uuid
 from typing import Annotated
 
 from fastapi import Depends, HTTPException, status
 from fastapi.concurrency import run_in_threadpool
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi.security import (
+    APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer,
+)
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
@@ -25,13 +28,40 @@ from app.models import Agent
 # rather than FastAPI's bare 403.
 bearer_scheme = HTTPBearer(auto_error=False, description="Supabase access token")
 
+# Only meaningful when DEV_AUTH_BYPASS is on (compose `local` profile). Declared
+# as a security scheme purely so Swagger renders an "Authorize" box for it —
+# paste a core.agent UUID there and every "Try it out" carries the header.
+dev_agent_scheme = APIKeyHeader(
+    name="X-Dev-Agent-Id", auto_error=False,
+    description="DEV_AUTH_BYPASS only: a core.agent UUID to act as.",
+)
+
 
 async def get_current_agent(
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
     session: Annotated[AsyncSession, Depends(get_session)],
     settings: Annotated[Settings, Depends(get_settings)],
+    x_dev_agent_id: Annotated[str | None, Depends(dev_agent_scheme)] = None,
 ) -> Agent:
     """401 for a missing/invalid token, 403 for a valid token with no agent row."""
+    if settings.dev_auth_bypass:
+        # Local profile only (config refuses this against a non-local DB). Identity
+        # comes straight from a header — no signature checking.
+        if not x_dev_agent_id:
+            raise unauthorized("DEV_AUTH_BYPASS is on; send X-Dev-Agent-Id")
+        try:
+            agent_id = uuid.UUID(x_dev_agent_id)
+        except ValueError:
+            raise unauthorized("X-Dev-Agent-Id is not a UUID")
+        agent = (
+            await session.execute(
+                select(Agent).options(joinedload(Agent.person)).where(Agent.id == agent_id)
+            )
+        ).scalar_one_or_none()
+        if agent is None:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Unknown dev agent id")
+        return agent
+
     if credentials is None or not credentials.credentials:
         raise unauthorized()
 

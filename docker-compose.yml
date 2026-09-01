@@ -1,21 +1,95 @@
+# Two profiles, never run together:
+#
+#   docker compose --profile supabase up --build   # the real API against Supabase (.env)
+#   docker compose --profile local    up --build   # throwaway Postgres, migrations, seed, bypassed auth
+#
+# `homelitics-api:latest` is built once (by the `api` service) and reused by the
+# rest, so only one service carries `build:`.
+
 services:
+  # ---------------------------------------------------------------------------
+  # Real API against Supabase. Everything comes from .env (gitignored + dockerignored).
+  # ---------------------------------------------------------------------------
   api:
+    profiles: ["supabase"]
     build: .
     image: homelitics-api:latest
     container_name: homelitics-api
     restart: unless-stopped
-    # Everything comes from .env — which is gitignored AND dockerignored.
     env_file: .env
     environment:
-      # Exactly one process may run the sweep, or each raises its own duplicate
-      # follow-up task for the same lead.
-      ENABLE_SCHEDULER: "true"
+      ENABLE_SCHEDULER: "true"     # exactly one process may run the sweep/relay
+    # One worker for the same reason: the in-process scheduler must not be
+    # duplicated. Scale out with a separate replica that has ENABLE_SCHEDULER=false.
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
     ports:
       - "8000:8000"
     healthcheck:
-      # Uses the image's own Python — no curl in the image, by design.
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4).status == 200 else 1)"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 20s
+
+  # ---------------------------------------------------------------------------
+  # Local profile: throwaway Postgres + migrations + one-shot seed + bypassed API.
+  #   docker compose --profile local up --build
+  # No .env, no Supabase, no credentials.
+  # ---------------------------------------------------------------------------
+  db:
+    profiles: ["local"]
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      # *.sql here run once, in filename order, on an empty data dir: 001→004.
+      # 004's Realtime block is guarded behind an `auth` schema check → no-ops here.
+      - ./migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  seed:
+    profiles: ["local"]
+    build: .
+    image: homelitics-api:latest
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL_MIGRATE: postgresql://postgres:postgres@db:5432/postgres
+    volumes:
+      - ./seed.py:/app/seed.py:ro
+      - ./geo_medellin.py:/app/geo_medellin.py:ro
+    command: ["python", "seed.py", "--scale", "small", "--seed", "42",
+              "--months", "12", "--now", "2026-08-31T00:00:00Z"]
+    restart: "no"
+
+  api-local:
+    profiles: ["local"]
+    image: homelitics-api:latest
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@db:5432/postgres
+      SUPABASE_PROJECT_REF: local-dev
+      DEV_AUTH_BYPASS: "true"
+      ENABLE_SCHEDULER: "true"
+      LOG_LEVEL: INFO
+    # One worker: APScheduler (sweep + event relay) is not multi-process safe —
+    # two workers would each run it and double every follow-up task.
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4).status == 200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s

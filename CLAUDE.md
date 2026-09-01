@@ -95,12 +95,18 @@ exclusively, never from `core` — which is why **every** one of the five expose
 
 | Cut | Consequence |
 |---|---|
-| Agent availability tables | HU-02 becomes *request a visit* → agent confirms, not *book a free slot*. Availability is a future external service. |
 | Appointment exclusion constraint | Double-booking prevention is FastAPI's job: query `idx_appointment_agent` for overlaps before insert. Removed because `EXCLUDE USING gist` with an inline `tstzrange` isn't IMMUTABLE and won't create. |
 | `consent` table | HU-20 is Won't-this-sprint. Synthetic data ⇒ no data subjects ⇒ no consent obligation during development. |
-| Kafka / event bus | Sync calls + scheduled jobs. `interaction` and `lead_stage_transition` are already append-only event tables, so the event *data model* survives; only the infrastructure is gone. |
-| Materialized views | Plain views. Always fresh, no refresh job. Revisit only if `listing_performance` gets slow. |
+| Kafka / event bus | Sync calls + scheduled jobs. `events.domain_event` (`004`) is a transactional outbox: `services/events.emit` writes in the caller's transaction, `jobs.relay_events` publishes. The event *data model* survives; only the broker is gone. |
+| Materialized views | Plain views. Always fresh, no refresh job. Backed by measurement — see `docs/DECISIONS.md` §13 (`scripts/measure_views.py`), p95 ≤ 133 ms. Revisit only if one crosses ~500 ms. |
 | `updated_at` triggers | The API sets `updated_at` on write. |
+
+**Reinstated (were cuts, now built):**
+- **Agent availability** — `003_availability.sql` adds `core.agent_availability`
+  (weekly rules) + `core.agent_time_off`. Slot maths is in the API
+  (`services/availability.compute_slots`, `America/Bogota`). HU-02 is still
+  *request → confirm*; `request_visit` enforces availability only when
+  `ENFORCE_AVAILABILITY=true` (default false). See `docs/DECISIONS.md` §11.
 
 Also deferred, additive if needed: `listing_price_history`, `message_template`,
 `notification`, `search_event`.
@@ -160,7 +166,21 @@ filter leaks across tenants and nothing else catches it.
 Endpoints cover all five priorities: create-or-return lead (via the UNIQUE guard,
 201/200), lead board + transitions, interaction timeline, visit request →
 confirm → feedback, `/leads/at-risk` plus an hourly APScheduler sweep, and
-analytics reading `analytics.*` only.
+analytics reading `analytics.*` only. Plus (Phase 4) `/agents/{id}/availability`,
+`.../time-off`, `.../slots`, and the `events.domain_event` outbox with a 30s
+relay (`jobs.relay_events`, `on_lead_created` → first-touch follow-up).
+
+`docs/API_GUIDE.md` is the full consume-the-API guide (auth, every endpoint with
+examples, the event model, an end-to-end walkthrough). `docs/AC_COVERAGE.md` is
+the AC → implementation → verification matrix.
+
+### Local one-command dev
+
+`docker compose --profile local up --build` — throwaway `postgres:17-alpine`,
+`migrations/*.sql` auto-applied on first boot (001→004), one-shot `seed`
+(`--scale small --seed 42`), API with `DEV_AUTH_BYPASS=true` (identity from
+`X-Dev-Agent-Id`; the app refuses to start with the bypass on against a
+non-local DB). No `.env`, no Supabase.
 
 ### Database state
 
@@ -173,13 +193,14 @@ Note the seed-42 numbers quoted above describe **`seed.py`'s** output, not the
 loaded data. Both seeders TRUNCATE first, so running `seed.py` replaces this
 dataset with the smaller reproducible one.
 
+Migrations `003`/`004` are applied to the live DB; `scripts/verify_db.py` is
+18/18 green. `.env` is filled and working in this worktree.
+
 ### Outstanding
 
-Blocked on credentials only: `.env` has the two connection strings stubbed as
-`[[DB-PASSWORD]]` / `[[POOLER-HOST]]` — fill them from the Supabase dashboard.
-Until then the API cannot connect, and `pytest` / `scripts/smoke.sh` cannot run.
 Two Supabase Auth users still need binding via `scripts/bind_agents.py`, or every
-authenticated request returns 403. See `README.md` steps 4–5.
+authenticated request returns 403 (`DEV_AUTH_BYPASS` sidesteps this locally). See
+`README.md` steps 4–5.
 
 ## Working style
 

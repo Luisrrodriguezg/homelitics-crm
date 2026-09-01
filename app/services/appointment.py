@@ -11,10 +11,12 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException, status
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.models import Agent, Appointment, Lead, Objection, VisitFeedback
+from app.services import events
 from app.services.lead import get_lead
 
 # What a client may ask for directly. COMPLETED/NO_SHOW are outcomes recorded
@@ -41,6 +43,15 @@ async def _assert_no_overlap(
     the dropped EXCLUDE constraint would have prevented. Locking the agent's
     candidate rows serialises those two transactions.
     """
+    # A `SELECT ... FOR UPDATE` that matches no rows locks nothing, so for a
+    # brand-new slot two concurrent bookers both see "no overlap" and both
+    # insert. A per-agent, transaction-scoped advisory lock closes that gap:
+    # the racers queue here and each sees the previous one's committed row.
+    await session.execute(
+        text("select pg_advisory_xact_lock(hashtextextended('appt:' || :aid, 0))"),
+        {"aid": str(agent_id)},
+    )
+
     end = start + timedelta(minutes=duration_min)
     appt_end = Appointment.scheduled_at + func.make_interval(
         0, 0, 0, 0, 0, Appointment.duration_min
@@ -91,6 +102,20 @@ async def request_visit(
         session, agent_id=lead.agent_id, start=scheduled_at, duration_min=duration_min
     )
 
+    # Optional: reject a slot the agent has not published. Off by default so the
+    # overlap tests keep their meaning; on, it enforces HU-05 against HU-02.
+    if get_settings().enforce_availability:
+        from app.services.availability import slot_is_available  # lazy: import cycle
+
+        if not await slot_is_available(
+            session, agent_id=lead.agent_id, agency_id=agent.agency_id,
+            scheduled_at=scheduled_at, duration_min=duration_min,
+        ):
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "That slot is outside the agent's published availability",
+            )
+
     appointment = Appointment(
         lead_id=lead_id,
         agent_id=lead.agent_id,
@@ -99,6 +124,16 @@ async def request_visit(
         status="PENDING_CONFIRMATION",
     )
     session.add(appointment)
+    await session.flush()
+    events.emit(
+        session,
+        event_type="appointment.booked",
+        aggregate_type="appointment",
+        aggregate_id=appointment.id,
+        agency_id=agent.agency_id,
+        payload={"lead_id": str(lead_id), "agent_id": str(lead.agent_id),
+                 "scheduled_at": scheduled_at.isoformat()},
+    )
     await session.commit()
     await session.refresh(appointment)
     return appointment

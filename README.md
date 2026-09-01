@@ -179,9 +179,11 @@ curl -s localhost:8000/me -H "Authorization: Bearer $TOKEN"
 
 ## Endpoints
 
-The OpenAPI schema at `/docs` is the reference — every route carries a summary,
-description and its error responses. There is no second copy here to fall out of
-date. In outline:
+**[docs/API_GUIDE.md](docs/API_GUIDE.md) is the full how-to-consume guide** —
+auth (prod JWT + local bypass), conventions, every endpoint with request/response
+examples, the domain-event model, an end-to-end funnel walkthrough, and an error
+reference. The OpenAPI schema at `/docs` is the live per-route reference. In
+outline:
 
 * `POST /leads` — create-or-return. **201** new, **200** existing.
 * `GET /leads`, `GET /leads/{id}`, `GET /leads/at-risk`
@@ -189,11 +191,33 @@ date. In outline:
 * `POST /leads/{id}/reassign` — TEAM_ADMIN only
 * `GET`/`POST /leads/{id}/interactions`, `.../tasks`, `.../appointments`
 * `PATCH /appointments/{id}`, `POST /appointments/{id}/feedback`
+* `GET`/`POST`/`PATCH`/`DELETE /agents/{id}/availability` — weekly reachable blocks (HU-05)
+* `GET`/`POST`/`DELETE /agents/{id}/time-off`
+* `GET /agents/{id}/slots?from=&to=` — free 30-min grid: weekly rules − time off − blocking visits
 * `GET /listings`, `GET /listings/{id}`, `POST /listings/{id}/views`
 * `GET /analytics/{funnel-daily,agent-response-time,listing-performance,north-star}`
 
 Everything except `/health` and the docs requires a bearer token and is scoped to
 the caller's agency.
+
+### Domain events
+
+`services/events.emit` writes an `events.domain_event` row **in the request's
+transaction** (`lead.created`, `lead.stage_changed`, `appointment.booked`,
+`lead.went_cold`). `jobs.relay_events` runs every `EVENT_RELAY_SECONDS` (gated by
+`ENABLE_SCHEDULER`), dispatches unpublished rows to in-process handlers
+(`on_lead_created` raises the first-touch follow-up) and stamps `published_at`.
+The table is on the `supabase_realtime` publication with RLS + an agency policy —
+the only grant `authenticated` holds anywhere in our schemas.
+
+### Extra environment variables
+
+| var | default | meaning |
+|---|---|---|
+| `EVENT_RELAY_SECONDS` | `30` | outbox relay interval (needs `ENABLE_SCHEDULER=true`) |
+| `APP_TIMEZONE` | `America/Bogota` | zone the availability slot maths runs in |
+| `ENFORCE_AVAILABILITY` | `false` | when true, `request_visit` rejects an unpublished slot |
+| `DEV_AUTH_BYPASS` | `false` | local only — identity from `X-Dev-Agent-Id`; app refuses to start against a non-local DB |
 
 ---
 
@@ -203,11 +227,21 @@ the caller's agency.
 pytest
 ```
 
-Integration tests against the real database — the four things they cover (a
-UNIQUE race, a row lock, cross-tenant filtering, a trigger) are all database
-behaviour, and a mock would prove nothing about any of them. They build and tear
-down their own two-agency fixture, so they work on an empty or a seeded database.
-Without `DATABASE_URL` set they skip rather than fail.
+Integration tests against a real database — the things they cover (a UNIQUE
+race, a row lock, cross-tenant filtering, a trigger, the outbox, slot maths) are
+all database behaviour, and a mock would prove nothing. They build and tear down
+their own two-agency fixture, so they work on an empty or a seeded database.
+Only the tests that need a DB are gated on `DATABASE_URL`; `tests/test_generator.py`
+runs without one.
+
+The Supabase pooler is slow from a laptop (~40 s/test). Point pytest at the
+local compose Postgres instead:
+
+```bash
+docker compose --profile local up -d db
+DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/postgres \
+  SUPABASE_PROJECT_REF=local-dev pytest      # full suite in seconds
+```
 
 ```bash
 API=http://localhost:8000 TOKEN=... CLIENT_ID=... LISTING_ID=... ./scripts/smoke.sh
@@ -230,6 +264,19 @@ docker compose logs -f api
 `env_file: .env`, nothing baked into the image, `.env` excluded by
 `.dockerignore`. Non-root user, healthcheck on `/health` (which round-trips to
 Postgres, so a broken database marks the container unhealthy).
+
+### One-command local stack (no Supabase, no `.env`)
+
+```bash
+docker compose --profile local up --build
+```
+
+Brings up a throwaway `postgres:17-alpine`, applies `migrations/*.sql` on first
+boot (001 → 004 in filename order — `004`'s Realtime block no-ops without an
+`auth` schema), runs a one-shot seed (`--scale small --seed 42`), then starts the
+API on `:8000` with `DEV_AUTH_BYPASS=true`. Send `X-Dev-Agent-Id: <core.agent
+uuid>` instead of a bearer token. The API refuses to start if the bypass is on
+while `DATABASE_URL` is not local.
 
 ### EC2 runbook
 
@@ -274,6 +321,8 @@ the inactivity sweep raises duplicate tasks. See DECISIONS.md §7.
 
 ## Further reading
 
+* [docs/API_GUIDE.md](docs/API_GUIDE.md) — how to consume the API, end to end.
+* [docs/AC_COVERAGE.md](docs/AC_COVERAGE.md) — acceptance-criteria traceability.
 * [docs/DECISIONS.md](docs/DECISIONS.md) — RLS vs service-layer filtering, no
   Alembic, the overlap lock, the trigger guard, and the rest.
 * [CLAUDE.md](CLAUDE.md) — the data model and the four rules that generate it.

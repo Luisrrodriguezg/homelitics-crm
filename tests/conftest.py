@@ -26,12 +26,22 @@ REQUIRED = ("DATABASE_URL", "SUPABASE_PROJECT_REF")
 _missing = [v for v in REQUIRED if not os.environ.get(v)]
 
 
+_DB_FIXTURES = {"session", "world", "client_for"}
+
+
 def pytest_collection_modifyitems(config, items):
-    if _missing:
-        skip = pytest.mark.skip(
-            reason=f"needs a live database; set {', '.join(_missing)} in .env"
-        )
-        for item in items:
+    """Skip only the tests that actually touch the database.
+
+    test_generator.py builds tuples in memory and must run without a
+    connection, so gating the whole suite on DATABASE_URL was too blunt.
+    """
+    if not _missing:
+        return
+    skip = pytest.mark.skip(
+        reason=f"needs a live database; set {', '.join(_missing)} in .env"
+    )
+    for item in items:
+        if _DB_FIXTURES.intersection(getattr(item, "fixturenames", ())):
             item.add_marker(skip)
 
 
@@ -78,103 +88,109 @@ async def world(session):
         session.add(p)
         return p
 
-    agencies, agents, listings = [], [], []
-    for a_i in range(2):
-        agency = Agency(name=f"{tag} agency {a_i}")
-        session.add(agency)
-        await session.flush()
-        agencies.append(agency)
+    # Build layer by layer with one flush per FK level instead of one per row.
+    agencies = [Agency(name=f"{tag} agency {i}") for i in range(2)]
+    clients_p = [person(f"client {i}") for i in range(2)]
+    owners_p = [person(f"owner {i}") for i in range(2)]
+    agents_p = [[person(f"agent {a}.{g}") for g in range(2)] for a in range(2)]
+    session.add_all(agencies + clients_p + owners_p + [p for pair in agents_p for p in pair])
+    await session.flush()
 
-        pair = []
-        for g_i in range(2):
-            per = person(f"agent {a_i}.{g_i}")
-            await session.flush()
-            ag = Agent(
-                person_id=per.id, agency_id=agency.id,
-                role="TEAM_ADMIN" if g_i == 0 else "AGENT",
+    agents = [
+        [
+            Agent(
+                person_id=agents_p[a][g].id, agency_id=agencies[a].id,
+                role="TEAM_ADMIN" if g == 0 else "AGENT",
                 auth_user_id=uuid.uuid4(),
             )
-            session.add(ag)
-            await session.flush()
-            pair.append(ag)
-        agents.append(pair)
+            for g in range(2)
+        ]
+        for a in range(2)
+    ]
+    owners = [Owner(person_id=owners_p[i].id) for i in range(2)]
+    clients = [Client(person_id=clients_p[i].id) for i in range(2)]
+    session.add_all([a for pair in agents for a in pair] + owners + clients)
+    await session.flush()
 
-        op = person(f"owner {a_i}")
-        await session.flush()
-        owner = Owner(person_id=op.id)
-        session.add(owner)
-        await session.flush()
-        prop = Property(
-            owner_id=owner.id, property_type="HOUSE", city=f"{tag} City",
+    props = [
+        Property(
+            owner_id=owners[i].id, property_type="HOUSE", city=f"{tag} City",
             neighborhood="N", address="1 Test St", area_m2=100, bedrooms=3, bathrooms=2,
         )
-        session.add(prop)
-        await session.flush()
-        listing = Listing(
-            property_id=prop.id, agent_id=pair[0].id, operation_type="SALE",
+        for i in range(2)
+    ]
+    session.add_all(props)
+    await session.flush()
+
+    listings = [
+        Listing(
+            property_id=props[i].id, agent_id=agents[i][0].id, operation_type="SALE",
             asking_price=100000, min_acceptable_price=90000,
         )
-        session.add(listing)
-        await session.flush()
-        listings.append(listing)
-
-    clients = []
-    for c_i in range(2):
-        cp = person(f"client {c_i}")
-        await session.flush()
-        c = Client(person_id=cp.id)
-        session.add(c)
-        await session.flush()
-        clients.append(c)
-
+        for i in range(2)
+    ]
+    session.add_all(listings)
     await session.commit()
+
+    # Snapshot plain UUIDs now. A test that calls session.rollback() expires
+    # every ORM object attached to the shared session, so reading `.id` in
+    # teardown would trigger a lazy refresh from the wrong context
+    # (MissingGreenlet). Teardown uses these, never the objects.
+    agency_ids = [a.id for a in agencies]
+    client_ids = [c.id for c in clients]
+    listing_ids = [l.id for l in listings]
+    property_ids = [p.id for p in props]
+    owner_ids = [o.id for o in owners]
 
     made.update(agencies=agencies, agents=agents, listings=listings, clients=clients)
     yield type("World", (), made)
 
-    # ---- teardown, children first ----
+    # ---- teardown ----
+    #
+    # Everything this fixture touches hangs off its two agencies, so we delete by
+    # agency in strict reverse-FK order. Each statement runs in its own tiny
+    # transaction (a fresh session per step): a Postgres error aborts only its
+    # own transaction, so one failure can't strand the rest, and the final tag
+    # sweep of pii.person still runs. That is the crash-safety the pre-003
+    # teardown lacked -- the thing scripts/purge_test_rows.sql exists to mop up.
     from sqlalchemy import delete, select
     from app.models import (
-        AssignmentAudit, Appointment, Deal, FollowUpTask, Interaction, Lead,
-        LeadLostDetail, LeadStageTransition, Offer, PropertyView, VisitFeedback,
+        AssignmentAudit, Appointment, Deal, DomainEvent, FollowUpTask, Interaction,
+        Lead, LeadLostDetail, LeadStageTransition, Offer, PropertyView, VisitFeedback,
     )
-    async with get_new_session() as s:
-        lead_ids = (
-            await s.execute(
-                select(Lead.id).where(Lead.listing_id.in_([l.id for l in listings]))
-            )
-        ).scalars().all()
-        appt_ids = (
-            await s.execute(
-                select(Appointment.id).where(Appointment.lead_id.in_(lead_ids))
-            )
-        ).scalars().all() if lead_ids else []
+    from app.models import (
+        AgentAvailability, AgentTimeOff, Property as P, Owner as O, Agency as A,
+        Agent as G, Client as C,
+    )
 
-        if appt_ids:
-            await s.execute(delete(VisitFeedback).where(VisitFeedback.appointment_id.in_(appt_ids)))
-        for model, col in (
-            (Appointment, "lead_id"), (Interaction, "lead_id"), (Offer, "lead_id"),
-            (Deal, "lead_id"), (FollowUpTask, "lead_id"), (AssignmentAudit, "lead_id"),
-            (LeadLostDetail, "lead_id"), (LeadStageTransition, "lead_id"),
-        ):
-            if lead_ids:
-                await s.execute(delete(model).where(getattr(model, col).in_(lead_ids)))
-        if lead_ids:
-            await s.execute(delete(Lead).where(Lead.id.in_(lead_ids)))
-        await s.execute(delete(PropertyView).where(
-            PropertyView.listing_id.in_([l.id for l in listings])))
-        await s.execute(delete(Listing).where(Listing.id.in_([l.id for l in listings])))
+    async def _run(stmt):
+        try:
+            async with get_new_session() as s:
+                await s.execute(stmt)
+                await s.commit()
+        except Exception as exc:  # noqa: BLE001 — teardown must not mask test results
+            print(f"world teardown: {exc.__class__.__name__} on {stmt}")
 
-        from app.models import Property as P, Owner as O, Agency as A, Agent as G, Client as C
-        await s.execute(delete(C).where(C.id.in_([c.id for c in clients])))
-        await s.execute(delete(G).where(G.id.in_([a.id for pair in agents for a in pair])))
-        prop_ids = [l.property_id for l in listings]
-        owner_ids = (await s.execute(select(P.owner_id).where(P.id.in_(prop_ids)))).scalars().all()
-        await s.execute(delete(P).where(P.id.in_(prop_ids)))
-        await s.execute(delete(O).where(O.id.in_(owner_ids)))
-        await s.execute(delete(A).where(A.id.in_([a.id for a in agencies])))
-        await s.execute(delete(Person).where(Person.full_name.like(f"{tag}%")))
-        await s.commit()
+    agent_ids = select(G.id).where(G.agency_id.in_(agency_ids))
+    lease_scope = select(Lead.id).where(Lead.agent_id.in_(agent_ids))
+    appt_scope = select(Appointment.id).where(Appointment.lead_id.in_(lease_scope))
+
+    await _run(delete(VisitFeedback).where(VisitFeedback.appointment_id.in_(appt_scope)))
+    for model in (Appointment, Interaction, Offer, Deal, FollowUpTask,
+                  AssignmentAudit, LeadLostDetail, LeadStageTransition):
+        await _run(delete(model).where(model.lead_id.in_(lease_scope)))
+    await _run(delete(Lead).where(Lead.agent_id.in_(agent_ids)))
+    await _run(delete(DomainEvent).where(DomainEvent.agency_id.in_(agency_ids)))
+    await _run(delete(PropertyView).where(PropertyView.listing_id.in_(listing_ids)))
+    await _run(delete(Listing).where(Listing.id.in_(listing_ids)))
+    await _run(delete(AgentAvailability).where(AgentAvailability.agent_id.in_(agent_ids)))
+    await _run(delete(AgentTimeOff).where(AgentTimeOff.agent_id.in_(agent_ids)))
+    await _run(delete(C).where(C.id.in_(client_ids)))
+    await _run(delete(G).where(G.agency_id.in_(agency_ids)))
+    await _run(delete(P).where(P.id.in_(property_ids)))
+    await _run(delete(O).where(O.id.in_(owner_ids)))
+    await _run(delete(A).where(A.id.in_(agency_ids)))
+    await _run(delete(Person).where(Person.full_name.like(f"{tag}%")))
 
 
 def get_new_session():

@@ -11,14 +11,14 @@ schemas.py, not as SQLAlchemy Enums, so adding a value needs no model change.
 from __future__ import annotations
 
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, time
 from decimal import Decimal
 
 from sqlalchemy import (
-    Boolean, Date, DateTime, ForeignKey, Numeric, SmallInteger, Text,
-    UniqueConstraint, func,
+    BigInteger, Boolean, Date, DateTime, ForeignKey, Integer, Numeric,
+    SmallInteger, Text, Time, UniqueConstraint, func,
 )
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -306,6 +306,36 @@ class Deal(Base):
     contract_months: Mapped[int | None] = mapped_column(SmallInteger)
 
 
+# -------------------------------------------------- core: availability
+
+class AgentAvailability(Base):
+    """A weekly recurring block an agent is reachable. weekday: 0=Mon..6=Sun."""
+    __tablename__ = "agent_availability"
+    __table_args__ = {"schema": "core"}
+
+    id: Mapped[uuid.UUID] = _pk()
+    agent_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("core.agent.id"), nullable=False)
+    weekday: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    start_time: Mapped[time] = mapped_column(Time, nullable=False)
+    end_time: Mapped[time] = mapped_column(Time, nullable=False)
+    valid_from: Mapped[date] = mapped_column(Date, nullable=False, server_default=func.current_date())
+    valid_to: Mapped[date | None] = mapped_column(Date)
+    created_at: Mapped[datetime] = _ts(server_default=func.now())
+
+
+class AgentTimeOff(Base):
+    """Ad-hoc unavailability. Half-open [starts_at, ends_at)."""
+    __tablename__ = "agent_time_off"
+    __table_args__ = {"schema": "core"}
+
+    id: Mapped[uuid.UUID] = _pk()
+    agent_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("core.agent.id"), nullable=False)
+    starts_at: Mapped[datetime] = _ts(nullable=False)
+    ends_at: Mapped[datetime] = _ts(nullable=False)
+    reason: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = _ts(server_default=func.now())
+
+
 # ------------------------------------------------------------ events
 
 class PropertyView(Base):
@@ -317,3 +347,20 @@ class PropertyView(Base):
     client_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("core.client.id"))
     session_id: Mapped[str] = mapped_column(Text, nullable=False)
     viewed_at: Mapped[datetime] = _ts(server_default=func.now())
+
+
+class DomainEvent(Base):
+    """Transactional outbox. The API inserts a row in the caller's transaction;
+    the jobs.relay_events job publishes it and stamps published_at."""
+    __tablename__ = "domain_event"
+    __table_args__ = {"schema": "events"}
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    event_type: Mapped[str] = mapped_column(Text, nullable=False)
+    aggregate_type: Mapped[str] = mapped_column(Text, nullable=False)
+    aggregate_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    agency_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
+    occurred_at: Mapped[datetime] = _ts(server_default=func.now())
+    published_at: Mapped[datetime | None] = _ts()
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
