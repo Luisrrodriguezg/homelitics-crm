@@ -170,7 +170,9 @@ analytics reading `analytics.*` only. Plus (Phase 4) `/agents/{id}/availability`
 `.../time-off`, `.../slots`, and the `events.domain_event` outbox with a 30s
 relay (`jobs.relay_events`, `on_lead_created` → first-touch follow-up).
 
-`docs/AC_COVERAGE.md` is the AC → implementation → verification matrix.
+`docs/API_GUIDE.md` is the full consume-the-API guide (auth, every endpoint with
+examples, the event model, an end-to-end walkthrough). `docs/AC_COVERAGE.md` is
+the AC → implementation → verification matrix.
 
 ### Local one-command dev
 

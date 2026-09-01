@@ -179,9 +179,11 @@ curl -s localhost:8000/me -H "Authorization: Bearer $TOKEN"
 
 ## Endpoints
 
-The OpenAPI schema at `/docs` is the reference — every route carries a summary,
-description and its error responses. There is no second copy here to fall out of
-date. In outline:
+**[docs/API_GUIDE.md](docs/API_GUIDE.md) is the full how-to-consume guide** —
+auth (prod JWT + local bypass), conventions, every endpoint with request/response
+examples, the domain-event model, an end-to-end funnel walkthrough, and an error
+reference. The OpenAPI schema at `/docs` is the live per-route reference. In
+outline:
 
 * `POST /leads` — create-or-return. **201** new, **200** existing.
 * `GET /leads`, `GET /leads/{id}`, `GET /leads/at-risk`
@@ -319,6 +321,8 @@ the inactivity sweep raises duplicate tasks. See DECISIONS.md §7.
 
 ## Further reading
 
+* [docs/API_GUIDE.md](docs/API_GUIDE.md) — how to consume the API, end to end.
+* [docs/AC_COVERAGE.md](docs/AC_COVERAGE.md) — acceptance-criteria traceability.
 * [docs/DECISIONS.md](docs/DECISIONS.md) — RLS vs service-layer filtering, no
   Alembic, the overlap lock, the trigger guard, and the rest.
 * [CLAUDE.md](CLAUDE.md) — the data model and the four rules that generate it.
