@@ -106,3 +106,28 @@ app.include_router(appointments.router)
 app.include_router(availability.router)
 app.include_router(listings.router)
 app.include_router(analytics.router)
+
+
+if settings.dev_auth_bypass:
+    # Under the local bypass, bearer auth is dead weight and having two OR-ed
+    # security schemes trips up the Swagger "Authorize" flow. Rewrite the spec so
+    # X-Dev-Agent-Id is the only scheme: one field, always sent on "Try it out".
+    from fastapi.openapi.utils import get_openapi
+
+    def _dev_openapi():
+        if app.openapi_schema:
+            return app.openapi_schema
+        schema = get_openapi(
+            title=app.title, version=app.version, description=app.description,
+            routes=app.routes, tags=app.openapi_tags,
+        )
+        comps = schema.get("components", {}).get("securitySchemes", {})
+        comps.pop("HTTPBearer", None)
+        for path in schema.get("paths", {}).values():
+            for op in path.values():
+                if isinstance(op, dict) and "security" in op:
+                    op["security"] = [{"APIKeyHeader": []}]
+        app.openapi_schema = schema
+        return schema
+
+    app.openapi = _dev_openapi
