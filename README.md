@@ -225,11 +225,21 @@ the only grant `authenticated` holds anywhere in our schemas.
 pytest
 ```
 
-Integration tests against the real database — the four things they cover (a
-UNIQUE race, a row lock, cross-tenant filtering, a trigger) are all database
-behaviour, and a mock would prove nothing about any of them. They build and tear
-down their own two-agency fixture, so they work on an empty or a seeded database.
-Without `DATABASE_URL` set they skip rather than fail.
+Integration tests against a real database — the things they cover (a UNIQUE
+race, a row lock, cross-tenant filtering, a trigger, the outbox, slot maths) are
+all database behaviour, and a mock would prove nothing. They build and tear down
+their own two-agency fixture, so they work on an empty or a seeded database.
+Only the tests that need a DB are gated on `DATABASE_URL`; `tests/test_generator.py`
+runs without one.
+
+The Supabase pooler is slow from a laptop (~40 s/test). Point pytest at the
+local compose Postgres instead:
+
+```bash
+docker compose --profile local up -d db
+DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/postgres \
+  SUPABASE_PROJECT_REF=local-dev pytest      # full suite in seconds
+```
 
 ```bash
 API=http://localhost:8000 TOKEN=... CLIENT_ID=... LISTING_ID=... ./scripts/smoke.sh
