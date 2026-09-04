@@ -9,6 +9,56 @@ Every North Star metric is measured on that funnel.
 
 ---
 
+## Live deployment
+
+The API is deployed and running: **https://homelitics-api.onrender.com**
+(interactive docs at [`/docs`](https://homelitics-api.onrender.com/docs), spec
+at `/openapi.json`). It's on Render's free tier, so it sleeps after 15 min idle —
+the first request after a quiet spell takes ~30–60s to wake up; every request
+after that is normal speed.
+
+The database behind it (`homelitics` on Supabase) is seeded and live: 6
+agencies, 48 agents, 1,200 listings, 9,402 leads, ~371k property views — a
+year of simulated activity with deliberately planted patterns (slow-responder
+agents, overpriced listings) so analytics work can be validated against known
+ground truth instead of assumed. Full breakdown in
+[docs/ground_truth.md](docs/ground_truth.md). Agent logins are provisioned —
+every agent has a real Supabase Auth account, so real bearer tokens work
+end to end.
+
+### Get a token and make a call
+
+```bash
+BASE=https://homelitics-api.onrender.com
+
+TOKEN=$(curl -s -X POST "https://<PROJECT_REF>.supabase.co/auth/v1/token?grant_type=password" \
+  -H "apikey: <ANON_KEY>" -H 'Content-Type: application/json' \
+  -d '{"email":"<agent-email>","password":"<shared demo password>"}' \
+  | jq -r .access_token)
+# ask whoever ran scripts/provision_agent_users.py for the project ref, anon
+# key, an agent email, and the shared password — they're deterministic
+# (<name>@<agency>.homelitics.test) but not published in this repo
+
+curl -s $BASE/me -H "Authorization: Bearer $TOKEN" | jq
+curl -s "$BASE/leads?limit=5" -H "Authorization: Bearer $TOKEN" | jq
+curl -s $BASE/analytics/north-star -H "Authorization: Bearer $TOKEN" | jq
+```
+
+`/me` is the right first call to sanity-check a token: **401** means the token
+itself is bad (missing, expired, or from a different Supabase project); **403**
+means the token is fine but no `core.agent` is bound to that user.
+
+**This is the fastest way for a peer to consume the API** — no local setup, no
+`.env`, no database access needed. For the full picture — every endpoint with
+request/response examples, the domain-event model, an end-to-end funnel
+walkthrough, and an error reference — see
+**[docs/API_GUIDE.md](docs/API_GUIDE.md)**.
+
+Everything below this point is about running or extending the service
+yourself, not just calling it.
+
+---
+
 ## The one thing that trips everyone up
 
 Supabase gives you three connection strings. Two of them are used here, for
@@ -94,51 +144,52 @@ five missing indexes including `agent(agency_id)`.
 
 ### 3. Seed
 
-**The live `homelitics` database is already populated** — ~499,000 rows loaded
-2026-08-31 by [`scripts/seed_sql.sql`](scripts/seed_sql.sql). You can skip this
-step entirely unless you want to reset it. See
-[docs/ground_truth.md](docs/ground_truth.md) for what is in there.
+**The live `homelitics` database is already populated** —
+`python seed.py --scale medium --seed 42 --months 12 --now 2026-08-31T00:00:00Z`,
+loaded 2026-09-01, cleaned of pytest debris on 2026-09-03. 6 agencies, 48
+agents, 1,200 listings, 9,402 leads, ~460,000 rows total including 371,567
+property views. You can skip this step entirely unless you want to reset it.
+Full numbers in [docs/ground_truth.md](docs/ground_truth.md).
 
-There are two seeders and they are **not** interchangeable:
-
-| | `scripts/seed_sql.sql` | `seed.py` |
-|---|---|---|
-| needs a connection string | **no** — runs inside Postgres | yes (`DATABASE_URL_MIGRATE`) |
-| how to run | paste into the Supabase SQL Editor | `python seed.py ...` |
-| size | 13,000 leads / 375k views | 1,789 leads / 77k views |
-| reproducible row-for-row | no (uses `random()`) | **yes** (`--seed 42`) |
-| currently loaded | **yes** | no |
-
-Both **TRUNCATE every table first.** Running `seed.py` will destroy the
-SQL-seeded data and replace it with the smaller, reproducible set.
+An older `scripts/seed_sql.sql` (a pure-SQL, non-reproducible generator you
+paste into the Supabase SQL Editor) loaded an earlier, larger dataset; `seed.py`
+replaced it as the source of truth because it's reproducible row-for-row for a
+given `--seed`. Prefer `seed.py` going forward.
 
 ```bash
-python seed.py --scale small --seed 42 --now 2026-08-31T00:00:00Z
+python seed.py --scale medium --seed 42 --months 12 --now 2026-08-31T00:00:00Z
 ```
 
-Uses `DATABASE_URL_MIGRATE` (5432). Takes 60–120s — network-bound, views go via
-`COPY`. **It truncates every table first.**
+Uses `DATABASE_URL_MIGRATE` (5432). **It truncates every table first** —
+including `core.agent.auth_user_id` (agent logins) and
+`core.agent_availability` — so re-seeding means re-running
+`scripts/provision_agent_users.py` and re-publishing availability afterwards.
+Scales: `small` (18 agents / 250 listings, ~90k rows, fastest) up through
+`medium` (currently loaded) to larger scales for load testing. Takes roughly a
+few minutes at `medium` — network-bound, views go via `COPY`.
 
 `--now` pins the simulation clock. The generator is translation-invariant, so
 this does not change any row counts; it shifts every timestamp as a block, which
 is what makes two runs on different days comparable.
 
 Save the printed ground-truth block to `docs/ground_truth.md` — the analytics
-tests assert against it. At `--scale small --seed 42` it produces 18 agents,
-250 listings, 927 clients, 1,789 leads, 4,839 transitions, 579 appointments,
-111 deals and 76,801 property views, with 7 slow-responder agents and 27
-overpriced listings planted so analytics work can be *validated* rather than
-assumed.
+tests assert against it. The generator plants 7-of-18 (or proportional at other
+scales) slow-responder agents and overpriced listings so analytics work can be
+*validated* rather than assumed.
 
 Then re-run `verify_db.py`: with data present it also asserts the trigger held
 through the bulk load, dedup is intact, and the injected patterns are visible.
 
 ### 4. Provision agent logins
 
-Until this runs, every authenticated request gets **403** — the token is valid
-but no `core.agent` row points at that user. Nobody types emails into the
-dashboard: the script creates one Supabase Auth user **per real agent** through
-the Auth Admin API and binds it.
+**Already done** on the live project — every one of the 48 agents has a bound
+Supabase Auth user, which is why real bearer tokens work against the deployed
+API today (see "Live deployment" above). This step only matters again after a
+re-seed (which wipes `auth_user_id`) or on a fresh project. Until it runs,
+every authenticated request gets **403** — the token is valid but no
+`core.agent` row points at that user. Nobody types emails into the dashboard:
+the script creates one Supabase Auth user **per real agent** through the Auth
+Admin API and binds it.
 
 ```bash
 # .env needs SUPABASE_SERVICE_ROLE_KEY (Supabase → Settings → API) and
@@ -315,12 +366,14 @@ API on `:8000` with `DEV_AUTH_BYPASS=true`. Send `X-Dev-Agent-Id: <core.agent
 uuid>` instead of a bearer token. The API refuses to start if the bypass is on
 while `DATABASE_URL` is not local.
 
-### Deploy for free (Render)
+### Deploy for free (Render) — already done
 
-The background jobs run in pg_cron, so the API container can sleep between
-requests. That makes Render's free tier enough: **750 instance-hours a month,
-sleeps after 15 min idle, ~1 min to wake** (Render shows a loading page while
-it does). No card needed.
+**Live at https://homelitics-api.onrender.com.** The background jobs run in
+pg_cron, so the API container can sleep between requests — that's what makes
+Render's free tier enough: **750 instance-hours a month, sleeps after 15 min
+idle, ~30–60s to wake** (Render shows a loading page while it does). No card
+needed. This is how it was set up, and how to redeploy from a fresh project or
+push an update:
 
 1. Push the branch. Render → **New → Blueprint** → pick the repo. It reads
    [`render.yaml`](render.yaml): Docker runtime, free plan, Oregon (same coast as
@@ -331,17 +384,18 @@ it does). No card needed.
    preset in the blueprint: project ref, empty JWT secret (JWKS project),
    `CORS_ORIGINS=*` (there is no frontend yet — replace with its URL when there
    is), `ENABLE_SCHEDULER=false`, `PORT=8000`.
-3. Deploy. Then:
+3. Deploy (or, for an update, just push to the branch Render is tracking — it
+   redeploys automatically). Then:
    ```bash
-   curl -s https://<service>.onrender.com/health
-   API=https://<service>.onrender.com TOKEN=... CLIENT_ID=... LISTING_ID=... ./scripts/smoke.sh
+   curl -s https://homelitics-api.onrender.com/health
+   API=https://homelitics-api.onrender.com TOKEN=... CLIENT_ID=... LISTING_ID=... ./scripts/smoke.sh
    ```
 4. Proof the jobs do not depend on the container: leave it asleep for an hour
    and watch `core.follow_up_task` still grow (or read `cron.job_run_details`).
 
-First request after idle takes ~60 s; tell the frontend team so they do not read
-it as an outage. Need always-on? Use the EC2 runbook below — same image, nothing
-else changes.
+First request after idle takes ~30–60s; tell peers so they don't read it as an
+outage. Need always-on? Use the EC2 runbook below — same image, nothing else
+changes.
 
 ### EC2 runbook
 
