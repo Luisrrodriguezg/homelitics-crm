@@ -25,6 +25,33 @@ pytestmark = pytest.mark.asyncio
 REQUIRED = ("DATABASE_URL", "SUPABASE_PROJECT_REF")
 _missing = [v for v in REQUIRED if not os.environ.get(v)]
 
+_LOCAL_HOSTS = {"localhost", "127.0.0.1", "db"}
+
+
+def _db_host(url: str) -> str:
+    return url.split("@", 1)[-1].split("/", 1)[0].split(":", 1)[0]
+
+
+def pytest_configure(config):
+    """Refuse to run the DB tests against anything but a local Postgres.
+
+    Every test creates a two-agency `pytest-*` world and deletes it afterwards,
+    but a run that dies mid-fixture leaves that world behind. On 2026-09-01 that
+    put 22 fake agencies and 44 fake agents into the live Supabase database.
+    Point DATABASE_URL at the compose Postgres (README "Tests"); to override on
+    purpose set ALLOW_REMOTE_TEST_DB=1 and clean up with
+    scripts/purge_test_rows.sql afterwards.
+    """
+    url = os.environ.get("DATABASE_URL", "")
+    if url and _db_host(url) not in _LOCAL_HOSTS and os.environ.get("ALLOW_REMOTE_TEST_DB") != "1":
+        pytest.exit(
+            f"DATABASE_URL points at {_db_host(url)!r}, not a local database. The test "
+            "fixtures write pytest-* rows and a failed teardown leaves them in place. "
+            "Use the compose Postgres (docker compose --profile local up -d db) or set "
+            "ALLOW_REMOTE_TEST_DB=1 to override deliberately.",
+            returncode=2,
+        )
+
 
 _DB_FIXTURES = {"session", "world", "client_for"}
 

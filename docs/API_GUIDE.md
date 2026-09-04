@@ -41,8 +41,10 @@ Authorization: Bearer <access_token>
 
 The token's `sub` claim (a Supabase `auth.users` UUID) is matched against
 `core.agent.auth_user_id`. That column is `NULL` on freshly seeded agents, so a
-valid token for an unbound user returns **403** until someone runs
-`scripts/bind_agents.py`. Get a token with the Supabase JS client, the Supabase
+valid token for an unbound user returns **403** until the logins are provisioned:
+`scripts/provision_agent_users.py` creates one Auth user per real agent
+(`<name>@<agency>.homelitics.test`, one shared `DEMO_AGENT_PASSWORD`) and binds
+it — see README step 4. Get a token with the Supabase JS client, the Supabase
 CLI, or a password-grant call to `${SUPABASE_URL}/auth/v1/token?grant_type=password`.
 
 - **401** — missing, malformed, or expired token
@@ -593,13 +595,28 @@ overpriced cohort shows high views with a low win rate.
 
 ## 7. Automatic background work
 
-Runs in-process on the API lifespan, gated by `ENABLE_SCHEDULER=true` (and it
-must run on **exactly one worker** — the compose services set `--workers 1`).
+Two jobs, implemented as SQL functions (`migrations/005_cron_jobs.sql`) and run
+by **pg_cron inside Supabase** — so they keep running while the API container
+is asleep on a free host. Nothing to configure on the API side.
 
-| job | interval | what it does |
+| job | runs | what it does |
 |---|---|---|
-| inactivity sweep | `SCHEDULER_INTERVAL_MINUTES` (60) | for every non-terminal lead with no `OUTBOUND` interaction in `INACTIVITY_HOURS` and no `PENDING` task: raise a follow-up task + an `OUTBOUND` `NOTE`, and emit `lead.went_cold`. Idempotent — a lead with a `PENDING` task is skipped |
-| event relay | `EVENT_RELAY_SECONDS` (30) | publish unpublished `events.domain_event` rows (see §8) |
+| `core.sweep_inactive_leads(72)` | hourly (`0 * * * *`) | for every non-terminal lead with no `OUTBOUND` interaction in 72 h and no `PENDING` task: raise a follow-up task (due +24 h) + an `OUTBOUND` `NOTE`, and emit `lead.went_cold`. Idempotent — a lead with a `PENDING` task is skipped. Max 500 leads per run |
+| `events.relay_domain_events()` | every 30 s | publish unpublished `events.domain_event` rows (see §8) |
+
+On the **local compose profile** there is no pg_cron, so the API's in-process
+scheduler (`ENABLE_SCHEDULER=true`, `app/jobs.py`) calls the same two functions
+on the same cadence. Never turn that on against Supabase — pg_cron already runs
+them and you would raise every follow-up twice.
+
+To see the jobs and their last runs on Supabase (SQL Editor):
+
+```sql
+select jobname, schedule, active from cron.job;
+select jobname, status, start_time, return_message
+from cron.job_run_details d join cron.job j on j.jobid = d.jobid
+order by start_time desc limit 10;
+```
 
 ---
 
@@ -607,10 +624,10 @@ must run on **exactly one worker** — the compose services set `--workers 1`).
 
 Kafka was cut. Instead, `services/events.emit()` writes a row to
 `events.domain_event` **in the same transaction as the business change**, so an
-event exists if and only if the change committed. The 30-second relay then
-dispatches each unpublished row to in-process handlers and stamps `published_at`.
-A handler that fails leaves the row unpublished with `attempts` bumped — one bad
-event never stalls the rest.
+event exists if and only if the change committed. The 30-second relay
+(`events.relay_domain_events()`, pg_cron) then runs the handler for each
+unpublished row and stamps `published_at`, taking its batch `for update skip
+locked` so two runners can never publish the same event twice.
 
 | `event_type` | emitted when | `aggregate_id` | payload keys | handler |
 |---|---|---|---|---|

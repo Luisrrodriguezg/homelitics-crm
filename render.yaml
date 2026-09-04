@@ -1,0 +1,38 @@
+# Render Blueprint — free, scale-to-zero hosting for the API.
+#
+#   Render dashboard -> New -> Blueprint -> pick this repo. Render reads this
+#   file, builds the Dockerfile and asks for the four `sync: false` secrets.
+#
+# Free instance behaviour: sleeps after 15 min without traffic, ~1 min to wake
+# (Render shows a loading page meanwhile), 750 free instance-hours per month
+# per workspace. That is fine because the background jobs do NOT live in this
+# container any more: pg_cron runs them inside Supabase (migrations/005), so
+# ENABLE_SCHEDULER stays false here. See README "Deploy for free (Render)".
+services:
+  - type: web
+    name: homelitics-api
+    runtime: docker
+    plan: free
+    region: oregon            # same coast as the aws-0-us-west-2 Supabase pooler
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health  # round-trips to Postgres; a dead DB fails the deploy
+    autoDeploy: true
+    envVars:
+      # Render prefers the app to bind $PORT; the Dockerfile binds 8000, so say so.
+      - key: PORT
+        value: "8000"
+      - key: ENABLE_SCHEDULER
+        value: "false"        # pg_cron owns the jobs on Supabase — never true here
+      - key: LOG_LEVEL
+        value: INFO
+      - key: SUPABASE_JWT_AUDIENCE
+        value: authenticated
+      # Secrets: set in the Render dashboard, never in this file.
+      - key: DATABASE_URL          # transaction pooler, port 6543, postgresql+asyncpg://
+        sync: false
+      - key: SUPABASE_PROJECT_REF
+        sync: false
+      - key: SUPABASE_JWT_SECRET   # leave EMPTY on modern (JWKS) projects
+        sync: false
+      - key: CORS_ORIGINS          # the frontend origin(s), comma-separated — not *
+        sync: false

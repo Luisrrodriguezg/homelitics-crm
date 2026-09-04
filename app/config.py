@@ -1,4 +1,5 @@
 """Settings, loaded from environment / .env."""
+import logging
 from functools import lru_cache
 
 from pydantic import Field, field_validator
@@ -77,6 +78,16 @@ class Settings(BaseSettings):
                 "DEV_AUTH_BYPASS is on but DATABASE_URL does not point at a local "
                 "database (localhost/127.0.0.1/db). Refusing to start — this would "
                 "disable authentication against a real database."
+            )
+        if self.enable_scheduler and not self._db_host_is_local:
+            # Not fatal: an EC2 box without pg_cron is a legitimate setup. But on
+            # Supabase, migrations/005 hands the sweep and relay to pg_cron, and
+            # running the in-process scheduler as well double-runs them.
+            logging.getLogger(__name__).warning(
+                "ENABLE_SCHEDULER=true against a non-local database. If this is "
+                "Supabase, pg_cron already runs the sweep and the relay "
+                "(migrations/005_cron_jobs.sql) — set ENABLE_SCHEDULER=false or "
+                "follow-ups will be raised twice."
             )
 
     @property

@@ -19,8 +19,12 @@ Target metrics (from the backlog):
 - **Database:** Supabase (managed Postgres). No RLS yet — authorization lives in the API.
 - **API:** FastAPI + SQLAlchemy 2.0 (async) + asyncpg + Pydantic v2.
 - **No event bus.** Kafka was considered and cut. Notifications are sent
-  synchronously in the request that triggers them; inactivity detection is a
-  scheduled job (pg_cron or APScheduler), not an event consumer.
+  synchronously in the request that triggers them; inactivity detection and the
+  outbox relay are **pg_cron jobs** (`005_cron_jobs.sql`), not event consumers.
+  The in-process APScheduler in `app/jobs.py` exists only for the local
+  container, which has no pg_cron — never enable it against Supabase.
+- **Hosting:** the API is stateless, so it runs on a free scale-to-zero host
+  (`render.yaml`, Render). EC2 is the always-on alternative, not a requirement.
 
 ### Supabase connection strings (this trips everyone up)
 
@@ -37,8 +41,10 @@ Target metrics (from the backlog):
   so re-running wipes and recreates. Paste into Supabase SQL Editor and Run.
   Click "Run without RLS" on the warning popup. Run `scripts/verify_db.py` first —
   if the live schema has drifted, this file will silently destroy it.
-- `migrations/` — `001_schema.sql` (the baseline) and `002_fixes.sql` (additive;
-  already applied to `homelitics`). `schema-2.sql` is kept equal to 001 + 002.
+- `migrations/` — `001_schema.sql` (the baseline) then `002`–`005` (additive,
+  idempotent; all applied to `homelitics`). `schema-2.sql` is kept equal to 001 + … + 005.
+- `render.yaml` — free Render deploy. `scripts/provision_agent_users.py` — one
+  Auth login per real agent (Admin API), replaces hand-made users.
 - `seed.py` — deterministic synthetic data generator.
   `python seed.py --scale small --seed 42 --now 2026-08-31T00:00:00Z`
 - `app/` — the FastAPI service. `README.md` covers setup and the EC2 runbook;
@@ -97,7 +103,8 @@ exclusively, never from `core` — which is why **every** one of the five expose
 |---|---|
 | Appointment exclusion constraint | Double-booking prevention is FastAPI's job: query `idx_appointment_agent` for overlaps before insert. Removed because `EXCLUDE USING gist` with an inline `tstzrange` isn't IMMUTABLE and won't create. |
 | `consent` table | HU-20 is Won't-this-sprint. Synthetic data ⇒ no data subjects ⇒ no consent obligation during development. |
-| Kafka / event bus | Sync calls + scheduled jobs. `events.domain_event` (`004`) is a transactional outbox: `services/events.emit` writes in the caller's transaction, `jobs.relay_events` publishes. The event *data model* survives; only the broker is gone. |
+| Kafka / event bus | Sync calls + scheduled jobs. `events.domain_event` (`004`) is a transactional outbox: `services/events.emit` writes in the caller's transaction, `events.relay_domain_events()` (`005`, pg_cron every 30 s) publishes. The event *data model* survives; only the broker is gone. |
+| Always-on host | Jobs run in pg_cron (`005`), so the container may sleep. Free Render deploy via `render.yaml`. `ENABLE_SCHEDULER` is local-only. `docs/DECISIONS.md` §14. |
 | Materialized views | Plain views. Always fresh, no refresh job. Backed by measurement — see `docs/DECISIONS.md` §13 (`scripts/measure_views.py`), p95 ≤ 133 ms. Revisit only if one crosses ~500 ms. |
 | `updated_at` triggers | The API sets `updated_at` on write. |
 
@@ -165,7 +172,7 @@ filter leaks across tenants and nothing else catches it.
 
 Endpoints cover all five priorities: create-or-return lead (via the UNIQUE guard,
 201/200), lead board + transitions, interaction timeline, visit request →
-confirm → feedback, `/leads/at-risk` plus an hourly APScheduler sweep, and
+confirm → feedback, `/leads/at-risk` plus an hourly pg_cron sweep (`005`), and
 analytics reading `analytics.*` only. Plus (Phase 4) `/agents/{id}/availability`,
 `.../time-off`, `.../slots`, and the `events.domain_event` outbox with a 30s
 relay (`jobs.relay_events`, `on_lead_created` → first-touch follow-up).
@@ -184,23 +191,27 @@ non-local DB). No `.env`, no Supabase.
 
 ### Database state
 
-**Populated.** ~499,000 rows loaded 2026-08-31 by `scripts/seed_sql.sql`, which
-generates everything server-side and so needs no connection string. Figures and
-cohort definitions are in `docs/ground_truth.md`. 13,000 leads across 6 agencies,
-375,281 property views; all integrity checks zero.
+**Populated** by `seed.py --scale medium --seed 42 --months 12 --now 2026-08-31`,
+loaded 2026-09-01 (it replaced the earlier `scripts/seed_sql.sql` load). 6 agencies,
+48 agents, 1,200 listings, 9,402 leads, 371,567 property views; all integrity
+checks zero. Measured figures and the cohorts are in `docs/ground_truth.md`.
+Both seeders TRUNCATE first — re-seeding wipes auth bindings and availability rules.
 
-Note the seed-42 numbers quoted above describe **`seed.py`'s** output, not the
-loaded data. Both seeders TRUNCATE first, so running `seed.py` replaces this
-dataset with the smaller reproducible one.
+On 2026-09-03 the live data was cleaned (pytest debris purged, 3 tiny repairs,
+default Mon–Fri availability for the 48 agents) — the exact SQL is in the
+session's `phase0_cleanup.sql`; `scripts/purge_test_rows.sql` is the reusable part.
+`tests/conftest.py` now refuses a non-local `DATABASE_URL` so debris cannot recur.
 
-Migrations `003`/`004` are applied to the live DB; `scripts/verify_db.py` is
-18/18 green. `.env` is filled and working in this worktree.
+Migrations `001`–`005` are applied to the live DB; `scripts/verify_db.py` is green.
+`.env` is filled and working in this worktree.
 
 ### Outstanding
 
-Two Supabase Auth users still need binding via `scripts/bind_agents.py`, or every
-authenticated request returns 403 (`DEV_AUTH_BYPASS` sidesteps this locally). See
-`README.md` steps 4–5.
+- **Logins:** `python scripts/provision_agent_users.py` (needs
+  `SUPABASE_SERVICE_ROLE_KEY` + `DEMO_AGENT_PASSWORD` in `.env`). Until then every
+  authenticated request returns 403; `DEV_AUTH_BYPASS` sidesteps this locally.
+- **Hosting:** create the Render Blueprint from `render.yaml`, set the four
+  secrets, run `scripts/smoke.sh` against the public URL. README "Deploy for free".
 
 ## Working style
 
