@@ -5,7 +5,7 @@ Read-only verification of the live homelitics database.
 Two groups of checks:
 
   STRUCTURE  always runs. Asserts the live schema matches what schema-2.sql
-             plus migrations/002_fixes.sql declare. This is the guard that runs
+             (= migrations 001..005) declares. This is the guard that runs
              *before* anything destructive: schema-2.sql opens with
              `drop schema ... cascade`, so if the live DB has drifted, we stop.
 
@@ -157,6 +157,25 @@ def verify_structure(cur):
                          join pg_namespace n on n.oid = c.relnamespace
                          where n.nspname='events' and c.relname='domain_event'""")
     check("events.domain_event has RLS enabled", rls_on is True)
+
+    # 005: the background jobs are SQL functions. On Supabase pg_cron calls them;
+    # on the local container app/jobs.py does. The functions must exist either way.
+    for schema, fn in (("core", "sweep_inactive_leads"), ("events", "relay_domain_events")):
+        n = one(cur, """select count(*) from pg_proc p
+                        join pg_namespace n on n.oid = p.pronamespace
+                        where n.nspname = %s and p.proname = %s""", (schema, fn))
+        check(f"{schema}.{fn}() exists (005)", n == 1,
+              "missing — apply migrations/005_cron_jobs.sql" if n != 1 else "")
+
+    if one(cur, "select exists (select 1 from pg_namespace where nspname = 'cron')"):
+        cur.execute("""select jobname, schedule, active from cron.job
+                       where jobname in ('homelitics_sweep', 'homelitics_relay')""")
+        jobs = {r[0]: (r[1], r[2]) for r in cur.fetchall()}
+        ok = set(jobs) == {"homelitics_sweep", "homelitics_relay"} and all(a for _, a in jobs.values())
+        check("pg_cron runs homelitics_sweep + homelitics_relay", ok,
+              ", ".join(f"{k}={v[0]!r}" for k, v in sorted(jobs.items())) or "no jobs scheduled")
+    else:
+        print("  skip  pg_cron not installed here — app/jobs.py drives the job functions")
 
 
 # ---------------------------------------------------------------- data

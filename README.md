@@ -45,11 +45,12 @@ app/
   schemas.py     Pydantic v2 + the legal funnel edges
   services/      lead, appointment, listing, analytics
   routers/       one per domain
-  jobs.py        hourly inactivity sweep (APScheduler)
-migrations/      001_schema.sql (baseline), 002_fixes.sql (additive)
-scripts/         verify_db.py, bind_agents.py, smoke.sh
-tests/           dedup race, overlap lock, tenancy isolation, funnel edges
-docs/            DECISIONS.md, ground_truth.md
+  jobs.py        local-only runner for the SQL job functions (pg_cron does this on Supabase)
+migrations/      001_schema.sql (baseline) … 005_cron_jobs.sql — additive, idempotent
+scripts/         verify_db.py, provision_agent_users.py, bind_agents.py, smoke.sh
+tests/           dedup race, overlap lock, tenancy isolation, funnel edges, outbox, slots
+docs/            DECISIONS.md, API_GUIDE.md, AC_COVERAGE.md, ground_truth.md
+render.yaml      free scale-to-zero deploy (Render Blueprint)
 ```
 
 ---
@@ -79,9 +80,11 @@ Read-only. Run it first, every time. `schema-2.sql` starts with
 
 ### 2. Migrations
 
-Already applied to `homelitics`. On a fresh project, run `migrations/001_schema.sql`
-then `migrations/002_fixes.sql` in the Supabase SQL Editor (click "Run without
-RLS" on the warning). `schema-2.sql` is the same thing as one idempotent file.
+Already applied to `homelitics` (001 → 005). On a fresh project either run
+`migrations/001..005` in order in the Supabase SQL Editor (click "Run without
+RLS" on the warning) or `python scripts/apply_migrations.py` against the session
+pooler. `schema-2.sql` is the same thing as one idempotent file. `005` enables
+**pg_cron** and schedules the two background jobs — see "Background jobs" below.
 
 What `002_fixes.sql` adds, and why, is in [docs/DECISIONS.md](docs/DECISIONS.md) —
 the short version: the `auth_user_id` link, a **guard on the stage-sync trigger**
@@ -130,20 +133,29 @@ assumed.
 Then re-run `verify_db.py`: with data present it also asserts the trigger held
 through the bulk load, dedup is intact, and the injected patterns are visible.
 
-### 4. Bind your Supabase users to agents
+### 4. Provision agent logins
 
 Until this runs, every authenticated request gets **403** — the token is valid
-but no `core.agent` row points at that user.
+but no `core.agent` row points at that user. Nobody types emails into the
+dashboard: the script creates one Supabase Auth user **per real agent** through
+the Auth Admin API and binds it.
 
 ```bash
-# Supabase → Authentication → Users → Add user (make two), then:
-python scripts/bind_agents.py --admin <UUID> --agent <UUID> --dry-run
-python scripts/bind_agents.py --admin <UUID> --agent <UUID>
+# .env needs SUPABASE_SERVICE_ROLE_KEY (Supabase → Settings → API) and
+# DEMO_AGENT_PASSWORD (≥ 8 chars, shared by every demo login). Then:
+python scripts/provision_agent_users.py --dry-run     # shows the 48 emails it will create
+python scripts/provision_agent_users.py               # creates + binds; idempotent
 ```
 
-It picks a `TEAM_ADMIN` and a plain `AGENT` from the busiest agency, choosing a
-known **slow responder** for the latter so the analytics endpoints show the
-planted pattern rather than a flat line.
+Emails are deterministic — `maria.mercedes.londono@cruz-oviedo.homelitics.test` —
+so a teammate only needs the shared password. No mail is ever sent
+(`email_confirm=true`, fake domain). `--only-admins` provisions just one
+`TEAM_ADMIN` and one `AGENT` per agency (12 users) if you want fewer.
+
+The service-role key bypasses RLS: keep it in `.env` on the machine that runs
+this script, never in a frontend or in Render's env vars (the API does not use
+it). `scripts/bind_agents.py` still exists for binding two users you created by
+hand.
 
 ### 5. Run
 
@@ -200,13 +212,31 @@ outline:
 Everything except `/health` and the docs requires a bearer token and is scoped to
 the caller's agency.
 
+### Background jobs — pg_cron, not the container
+
+Two jobs, both SQL functions from `migrations/005_cron_jobs.sql`, scheduled by
+**pg_cron inside Supabase**:
+
+| job | schedule | does |
+|---|---|---|
+| `core.sweep_inactive_leads(72)` | hourly | open leads with no OUTBOUND contact in 72 h and no PENDING task → follow-up task + NOTE + `lead.went_cold` |
+| `events.relay_domain_events()` | every 30 s | publishes the outbox (below); `lead.created` → first-touch follow-up |
+
+Because the jobs live in Postgres, the API container may sleep — that is what
+makes the free Render deploy below viable. **`ENABLE_SCHEDULER` must stay `false`
+on Supabase**: it turns on an in-process APScheduler that calls the same two
+functions, which exists only for the local compose profile (no pg_cron in
+`postgres:17-alpine`). Run both and every follow-up is raised twice; the app
+logs a warning if you try. Inspect the jobs with
+`select jobname, schedule, active from cron.job` and their runs in
+`cron.job_run_details`. `docs/DECISIONS.md` §14.
+
 ### Domain events
 
 `services/events.emit` writes an `events.domain_event` row **in the request's
 transaction** (`lead.created`, `lead.stage_changed`, `appointment.booked`,
-`lead.went_cold`). `jobs.relay_events` runs every `EVENT_RELAY_SECONDS` (gated by
-`ENABLE_SCHEDULER`), dispatches unpublished rows to in-process handlers
-(`on_lead_created` raises the first-touch follow-up) and stamps `published_at`.
+`lead.went_cold`). The relay above stamps `published_at`, taking its batch
+`for update skip locked` so two runners can never publish the same row.
 The table is on the `supabase_realtime` publication with RLS + an agency policy —
 the only grant `authenticated` holds anywhere in our schemas.
 
@@ -214,10 +244,12 @@ the only grant `authenticated` holds anywhere in our schemas.
 
 | var | default | meaning |
 |---|---|---|
-| `EVENT_RELAY_SECONDS` | `30` | outbox relay interval (needs `ENABLE_SCHEDULER=true`) |
+| `ENABLE_SCHEDULER` | `false` | in-process runner for the two job functions. **Local profile only** — pg_cron owns them on Supabase |
+| `EVENT_RELAY_SECONDS` | `30` | relay interval for that in-process runner |
 | `APP_TIMEZONE` | `America/Bogota` | zone the availability slot maths runs in |
-| `ENFORCE_AVAILABILITY` | `false` | when true, `request_visit` rejects an unpublished slot |
+| `ENFORCE_AVAILABILITY` | `false` | when true, `request_visit` rejects an unpublished slot. Keep false until agents publish real rules |
 | `DEV_AUTH_BYPASS` | `false` | local only — identity from `X-Dev-Agent-Id`; app refuses to start against a non-local DB |
+| `SUPABASE_SERVICE_ROLE_KEY`, `DEMO_AGENT_PASSWORD` | — | read **only** by `scripts/provision_agent_users.py`; the API never needs them |
 
 ---
 
@@ -234,14 +266,19 @@ their own two-agency fixture, so they work on an empty or a seeded database.
 Only the tests that need a DB are gated on `DATABASE_URL`; `tests/test_generator.py`
 runs without one.
 
-The Supabase pooler is slow from a laptop (~40 s/test). Point pytest at the
-local compose Postgres instead:
+Point pytest at the local compose Postgres:
 
 ```bash
 docker compose --profile local up -d db
 DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/postgres \
   SUPABASE_PROJECT_REF=local-dev pytest      # full suite in seconds
 ```
+
+**pytest refuses to run against a non-local `DATABASE_URL`.** The fixtures write
+`pytest-*` rows and a run that dies mid-fixture leaves them behind — that is how
+22 fake agencies ended up in the live database on 2026-09-01. If you really must
+(and will run `scripts/purge_test_rows.sql` afterwards), set
+`ALLOW_REMOTE_TEST_DB=1`.
 
 ```bash
 API=http://localhost:8000 TOKEN=... CLIENT_ID=... LISTING_ID=... ./scripts/smoke.sh
@@ -278,6 +315,34 @@ API on `:8000` with `DEV_AUTH_BYPASS=true`. Send `X-Dev-Agent-Id: <core.agent
 uuid>` instead of a bearer token. The API refuses to start if the bypass is on
 while `DATABASE_URL` is not local.
 
+### Deploy for free (Render)
+
+The background jobs run in pg_cron, so the API container can sleep between
+requests. That makes Render's free tier enough: **750 instance-hours a month,
+sleeps after 15 min idle, ~1 min to wake** (Render shows a loading page while
+it does). No card needed.
+
+1. Push the branch. Render → **New → Blueprint** → pick the repo. It reads
+   [`render.yaml`](render.yaml): Docker runtime, free plan, Oregon (same coast as
+   the `aws-0-us-west-2` pooler), health check on `/health`.
+2. It asks for exactly one value: `DATABASE_URL` — copy it from `.env`
+   (transaction pooler, port 6543, `postgresql+asyncpg://...`; it contains the
+   database password, which is why it is not in the file). Everything else is
+   preset in the blueprint: project ref, empty JWT secret (JWKS project),
+   `CORS_ORIGINS=*` (there is no frontend yet — replace with its URL when there
+   is), `ENABLE_SCHEDULER=false`, `PORT=8000`.
+3. Deploy. Then:
+   ```bash
+   curl -s https://<service>.onrender.com/health
+   API=https://<service>.onrender.com TOKEN=... CLIENT_ID=... LISTING_ID=... ./scripts/smoke.sh
+   ```
+4. Proof the jobs do not depend on the container: leave it asleep for an hour
+   and watch `core.follow_up_task` still grow (or read `cron.job_run_details`).
+
+First request after idle takes ~60 s; tell the frontend team so they do not read
+it as an outage. Need always-on? Use the EC2 runbook below — same image, nothing
+else changes.
+
 ### EC2 runbook
 
 1. Launch Amazon Linux 2023, `t3.small` or better. Security group: inbound 22
@@ -299,8 +364,8 @@ while `DATABASE_URL` is not local.
      caddy caddy reverse-proxy --from api.example.com --to localhost:8000
    ```
 
-Scaling past one instance: set `ENABLE_SCHEDULER=false` everywhere except one, or
-the inactivity sweep raises duplicate tasks. See DECISIONS.md §7.
+Scaling past one instance is free of job concerns now: the sweep and relay run
+in pg_cron, and `ENABLE_SCHEDULER` stays `false` on every replica. DECISIONS.md §14.
 
 ---
 
@@ -309,12 +374,15 @@ the inactivity sweep raises duplicate tasks. See DECISIONS.md §7.
 | Symptom | Cause |
 |---|---|
 | `prepared statement __asyncpg_stmt_x__ does not exist` | `statement_cache_size: 0` missing, or you are on 5432 instead of 6543 |
-| Everything 403s, `/health` fine | No agent bound — run `scripts/bind_agents.py` |
+| Everything 403s, `/health` fine | No agent bound — run `scripts/provision_agent_users.py` |
+| `pytest` exits immediately with "not a local database" | Deliberate guard. Point `DATABASE_URL` at the compose Postgres, or set `ALLOW_REMOTE_TEST_DB=1` and purge afterwards |
+| No follow-ups ever appear on Supabase | `005` not applied, or the pg_cron jobs are inactive: `select * from cron.job` |
 | 401 with a token that works elsewhere | Token is from a different Supabase project; `iss`/`aud` are checked |
 | `Network is unreachable` on connect | You used the Direct connection string — IPv6-only on free tier |
 | Connection hangs, project looks fine | Free tier paused after 7 days idle; resume in the dashboard |
 | `seed.py` is slow | Expected: 60–120s, network-bound |
-| Duplicate follow-up tasks | `ENABLE_SCHEDULER=true` on more than one worker |
+| Duplicate follow-up tasks | `ENABLE_SCHEDULER=true` on a Supabase deploy (pg_cron already runs the sweep), or on more than one local worker |
+| Render URL takes a minute to answer | Free instance waking from sleep after 15 min idle — expected |
 | `verify_db.py` fails | Live schema drifted. **Do not** run `schema-2.sql` — it wipes. Reconcile first. |
 
 ---

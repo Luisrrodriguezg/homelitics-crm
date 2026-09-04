@@ -147,6 +147,11 @@ Chosen over pg_cron because the logic writes two related rows and belongs with
 the rest of the domain code. **Revisit if** the API scales past one replica —
 at that point move it to pg_cron or a dedicated worker, not a leader election.
 
+**Revisited 2026-09-03 — superseded by §14.** The trigger was not scale but
+cost: the in-process scheduler was the only thing that forced an always-on
+host. The jobs now run in pg_cron; APScheduler survives only as the runner for
+the local container, which has no pg_cron.
+
 ---
 
 ## 8. No repository layer
@@ -246,3 +251,66 @@ All well under a dashboard's tolerance, so a matview + refresh job would be
 moving parts with nothing to buy them. **Revisit** the moment one crosses
 ~500 ms — at that point build the matview for that view only, not all five.
 Re-run `scripts/measure_views.py` to check.
+
+---
+
+## 14. Background jobs run in pg_cron; the API can sleep (005_cron_jobs.sql)
+
+**Decision.** The inactivity sweep and the outbox relay are SQL functions
+(`core.sweep_inactive_leads(p_hours)`, `events.relay_domain_events(p_batch)`)
+scheduled by pg_cron inside Supabase — hourly and every 30 s. `app/jobs.py` keeps
+an APScheduler that calls the *same* functions, but it is only for the local
+compose container (plain `postgres:17-alpine` ships no pg_cron). On Supabase
+`ENABLE_SCHEDULER` must be false; `config.py` warns if it is not.
+
+**Why.**
+
+*Cost, not scale.* §7 said "revisit when the API scales past one replica". The
+actual pressure was the opposite: a university team does not want to pay for an
+EC2 instance, and the in-process scheduler was the one reason the container had
+to stay awake. Every other route is stateless. With the jobs in Postgres the API
+can run on a free scale-to-zero host (Render, `render.yaml`) and sleep between
+requests while follow-ups keep appearing.
+
+*One implementation, two runners.* The alternative — pg_cron calling the API
+over `pg_net` — keeps the Python code but needs the container awake to receive
+the call, which defeats the point on a host that takes a minute to wake. Writing
+the jobs as SQL and having Python call them means the local and the Supabase
+paths execute identical logic, and `tests/test_events.py` did not change.
+
+*It closed a real hole.* The Python relay had no protection against two runners
+dispatching the same event. The SQL version selects its batch
+`for update skip locked`, so a stray in-process scheduler next to pg_cron can
+never double-publish. Duplicate follow-ups are still possible if *both* runners
+sweep, hence the config warning.
+
+**What it does not do.** No per-event error isolation: the Python relay bumped
+`attempts` and carried on past a failing handler; the SQL batch is one
+transaction and retries whole on the next tick. With a single handler that only
+joins `core.lead`, there is no failure mode that would stall the batch. If a
+handler that can fail is added, split it into its own function and job.
+
+**Not Supabase Cron via `pg_net`, not Edge Functions.** Both were considered as
+"more Supabase-native"; both add a network hop (or a rewrite) to do what a
+30-line SQL function does in-place.
+
+**Revisit if** the jobs need to call something outside Postgres (email, push):
+at that point emit the event here and let a tiny worker or `pg_net` deliver it.
+
+---
+
+## 15. Agent logins are provisioned, not typed in (scripts/provision_agent_users.py)
+
+`bind_agents.py` binds two users created by hand in the dashboard. That does not
+scale to a team demo where each member should log in as a different agent, and
+nobody wants to type 48 emails. The script creates one Auth user per real agent
+through the **Auth Admin API** (`POST /auth/v1/admin/users`, service-role key,
+`email_confirm=true` so no mail is sent), with a deterministic address
+`<name-slug>@<agency-slug>.homelitics.test` and one shared `DEMO_AGENT_PASSWORD`,
+then writes the id into `core.agent.auth_user_id`. Idempotent: bound agents are
+skipped and an existing email is looked up in `auth.users` over the direct
+connection instead of paged through the admin list.
+
+The service-role key bypasses RLS and creates users. It belongs in `.env` on the
+machine that runs the script and nowhere else — never in a frontend, never in
+Render's env vars (the API does not need it).

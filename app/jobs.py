@@ -1,62 +1,30 @@
-"""Inactivity sweep.
+"""Background jobs — thin wrappers around the SQL functions in migrations/005.
 
-CLAUDE.md cut the event bus: inactivity detection is a scheduled job, not an
-event consumer. APScheduler runs it in-process on the FastAPI lifespan.
+The job *bodies* live in Postgres (`core.sweep_inactive_leads`,
+`events.relay_domain_events`) so that one implementation serves two runners:
 
-Gated by ENABLE_SCHEDULER because it is NOT distributed-safe: every replica that
-runs it would raise its own duplicate task for the same lead. Run it on exactly
-one worker, or move it to pg_cron. (Recorded in docs/DECISIONS.md.)
+  * Supabase: pg_cron calls them directly (hourly / every 30 s). The API
+    container can sleep; the funnel keeps ticking. docs/DECISIONS.md §14.
+  * Local compose (plain postgres:17-alpine, no pg_cron): this module's
+    APScheduler calls the same functions on the FastAPI lifespan.
+
+ENABLE_SCHEDULER gates the in-process runner. On a Supabase deploy leave it
+false — pg_cron owns the jobs there, and running both double-runs the sweep
+(config.py logs a warning if you do). Still not multi-worker safe: one process.
 """
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
-from sqlalchemy import func, or_, select
+from sqlalchemy import text
 
 from app.config import get_settings
 from app.db import get_sessionmaker
-from app.models import Agent, FollowUpTask, Interaction, Lead, LeadStage
 from app.services import events
 
 log = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------- event handlers
-#
-# Registered on import. The relay (events.relay_events) dispatches unpublished
-# outbox rows here. Handlers run in the relay's transaction and must be
-# idempotent — a handler that raises is retried on the next tick.
-
-@events.register("lead.created")
-async def on_lead_created(session, event) -> None:
-    """HU-10 entry point: every new lead gets a first-touch follow-up task."""
-    lead_id = event.aggregate_id
-    exists_pending = (
-        await session.execute(
-            select(FollowUpTask.id).where(
-                FollowUpTask.lead_id == lead_id, FollowUpTask.status == "PENDING"
-            )
-        )
-    ).first()
-    if exists_pending:
-        return
-    agent_id = (
-        await session.execute(select(Lead.agent_id).where(Lead.id == lead_id))
-    ).scalar_one_or_none()
-    if agent_id is None:
-        return
-    session.add(
-        FollowUpTask(
-            lead_id=lead_id,
-            agent_id=agent_id,
-            due_at=datetime.now(timezone.utc) + timedelta(hours=24),
-            note="Auto-raised: first-touch follow-up for a new lead.",
-            status="PENDING",
-        )
-    )
 
 
 async def relay_events() -> int:
@@ -68,95 +36,23 @@ async def relay_events() -> int:
 async def sweep_inactive_leads() -> int:
     """Raise a follow-up task + a NOTE on every lead that has gone quiet.
 
-    Idempotent by design: a lead that already has a PENDING task is skipped, so
-    running the sweep twice in an hour does not produce two tasks.
+    Delegates to core.sweep_inactive_leads(p_hours). Idempotent by design: a
+    lead that already has a PENDING task is skipped, so running the sweep twice
+    in an hour does not produce two tasks.
     """
     settings = get_settings()
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=settings.inactivity_hours)
-
     async with get_sessionmaker()() as session:
-        terminal = select(LeadStage.code).where(LeadStage.is_terminal.is_(True))
-
-        last_outbound = (
-            select(func.max(Interaction.occurred_at))
-            .where(Interaction.lead_id == Lead.id, Interaction.direction == "OUTBOUND")
-            .correlate(Lead)
-            .scalar_subquery()
-        )
-        already_queued = (
-            select(FollowUpTask.id)
-            .where(FollowUpTask.lead_id == Lead.id, FollowUpTask.status == "PENDING")
-            .correlate(Lead)
-            .exists()
-        )
-
-        stale = (
+        raised = (
             await session.execute(
-                select(Lead)
-                .where(
-                    Lead.current_stage.not_in(terminal),
-                    Lead.created_at < cutoff,
-                    or_(last_outbound.is_(None), last_outbound < cutoff),
-                    ~already_queued,
-                )
-                .limit(500)
+                text("select core.sweep_inactive_leads(:hours)"),
+                {"hours": settings.inactivity_hours},
             )
-        ).scalars().all()
-
-        agent_agency: dict = {}
-        if stale:
-            agent_agency = dict(
-                (
-                    await session.execute(
-                        select(Agent.id, Agent.agency_id).where(
-                            Agent.id.in_({l.agent_id for l in stale})
-                        )
-                    )
-                ).all()
-            )
-
-        now = datetime.now(timezone.utc)
-        for lead in stale:
-            session.add(
-                FollowUpTask(
-                    lead_id=lead.id,
-                    agent_id=lead.agent_id,
-                    due_at=now + timedelta(hours=24),
-                    note=(
-                        f"Auto-raised: no outbound contact in "
-                        f"{settings.inactivity_hours}h."
-                    ),
-                    status="PENDING",
-                )
-            )
-            session.add(
-                Interaction(
-                    lead_id=lead.id,
-                    direction="OUTBOUND",
-                    channel="IN_APP",
-                    type="NOTE",
-                    body=(
-                        f"Lead flagged inactive after {settings.inactivity_hours}h "
-                        f"with no outbound contact."
-                    ),
-                    occurred_at=now,
-                    created_by=lead.agent_id,
-                )
-            )
-            events.emit(
-                session,
-                event_type="lead.went_cold",
-                aggregate_type="lead",
-                aggregate_id=lead.id,
-                agency_id=agent_agency.get(lead.agent_id),
-                payload={"inactivity_hours": settings.inactivity_hours},
-            )
-
+        ).scalar_one()
         await session.commit()
 
-    if stale:
-        log.info("inactivity sweep: raised follow-ups for %d lead(s)", len(stale))
-    return len(stale)
+    if raised:
+        log.info("inactivity sweep: raised follow-ups for %d lead(s)", raised)
+    return raised
 
 
 def build_scheduler() -> AsyncIOScheduler | None:

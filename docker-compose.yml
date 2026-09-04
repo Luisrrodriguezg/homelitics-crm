@@ -18,9 +18,9 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
-      ENABLE_SCHEDULER: "true"     # exactly one process may run the sweep/relay
-    # One worker for the same reason: the in-process scheduler must not be
-    # duplicated. Scale out with a separate replica that has ENABLE_SCHEDULER=false.
+      # On Supabase the sweep and the outbox relay run in pg_cron
+      # (migrations/005_cron_jobs.sql). Running them here too would double up.
+      ENABLE_SCHEDULER: "false"
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
     ports:
       - "8000:8000"
@@ -80,10 +80,10 @@ services:
       DATABASE_URL: postgresql+asyncpg://postgres:postgres@db:5432/postgres
       SUPABASE_PROJECT_REF: local-dev
       DEV_AUTH_BYPASS: "true"
-      ENABLE_SCHEDULER: "true"
+      ENABLE_SCHEDULER: "true"     # no pg_cron in postgres:17-alpine, so the API drives the jobs here
       LOG_LEVEL: INFO
-    # One worker: APScheduler (sweep + event relay) is not multi-process safe —
-    # two workers would each run it and double every follow-up task.
+    # One worker: the in-process scheduler (sweep + event relay) is not
+    # multi-process safe — two workers would each run it and double every task.
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
     ports:
       - "8000:8000"

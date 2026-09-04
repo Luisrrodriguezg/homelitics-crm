@@ -5,7 +5,7 @@ wording is paraphrased from the backlog; the mapping is what matters for review.
 
 Verification commands, from the repo root with `.env` present:
 
-- `python scripts/verify_db.py` — 18/18 structural + ground-truth checks
+- `python scripts/verify_db.py` — structural + ground-truth checks (21 on Supabase, 20 on the local container which has no pg_cron)
 - `pytest` — full suite against the live DB (`tests/test_generator.py` needs no DB)
 - `pytest tests/test_generator.py` — generator invariants, no connection
 - `python scripts/measure_views.py` — analytics view p95 (DECISIONS §13)
@@ -29,14 +29,25 @@ Verification commands, from the repo root with `.env` present:
 
 | AC | Requirement | Satisfied by | Verified by |
 |---|---|---|---|
-| AC1 | Migrations as versioned artifacts | `migrations/001..004`, each idempotent; `scripts/apply_migrations.py`; `schema-2.sql` = 001+002+003+004. **Deviation:** no Alembic — `docs/DECISIONS.md` §2 | `scripts/verify_db.py` structure checks |
+| AC1 | Migrations as versioned artifacts | `migrations/001..005`, each idempotent; `scripts/apply_migrations.py`; `schema-2.sql` = 001+…+005. **Deviation:** no Alembic — `docs/DECISIONS.md` §2 | `scripts/verify_db.py` structure checks |
 | AC2 | HU-01: create-or-return lead, race-free dedup | `services/lead.create_or_get_lead` — `INSERT … ON CONFLICT DO NOTHING RETURNING`, 201 new / 200 existing; DB `UNIQUE (client_id, listing_id)` | `tests/test_dedup.py` (incl. 6 concurrent posts) |
 | AC3 | HU-02/05/06/07/14: visit request → confirm → feedback; agent availability & slots; funnel transitions; timeline | `routers/appointments.py`, `routers/availability.py` (`/availability`, `/time-off`, `/slots`), `routers/leads.py` transitions + interactions; `services/availability.compute_slots` (`America/Bogota`, reuses `_BLOCKING`) | `tests/test_transitions.py`, `tests/test_appointment_overlap.py`, `tests/test_availability.py` |
-| AC4 | Domain events / outbox + a consumer | `events.domain_event` (`004`); `services/events.emit` in the caller's txn; `jobs.relay_events` 30s relay; `on_lead_created` → first-touch follow-up (HU-10); on `supabase_realtime` publication | `tests/test_events.py`; `verify_db.py` (`domain_event` present, RLS on, one grant); `pg_publication_tables` |
+| AC4 | Domain events / outbox + a consumer | `events.domain_event` (`004`); `services/events.emit` in the caller's txn; `events.relay_domain_events()` (`005`) run by pg_cron every 30 s — `lead.created` → first-touch follow-up (HU-10); on `supabase_realtime` publication | `tests/test_events.py`; `verify_db.py` (`domain_event` present, RLS on, one grant, both job functions, both `cron.job` rows); `pg_publication_tables` |
 | AC5 | Happy-path tests + one-command local dev | `tests/*` (20 existing + generator/availability/events); `docker compose --profile local` (postgres + migrations + seed + API w/ `DEV_AUTH_BYPASS`) | `pytest`; `docker compose --profile local up --build` |
 | AC6 | Analytics performance | Plain `analytics.*` views, all expose `agency_id`. **Deviation:** not materialized — measured, p95 ≤ 133 ms (`docs/DECISIONS.md` §13) | `scripts/measure_views.py` |
 | — | Multi-tenant isolation (cross-cutting) | every service call takes `agency_id`, joins `core.agent`; RLS not used — `docs/DECISIONS.md` §1 | `tests/test_tenancy.py` (7 cases) |
-| — | Inactivity detection (HU-10/at-risk) | `jobs.sweep_inactive_leads` hourly + `/leads/at-risk`; now also emits `lead.went_cold` | `pytest` (at-risk path); `verify_db.py` |
+| — | Inactivity detection (HU-10/at-risk) | `core.sweep_inactive_leads(72)` hourly via pg_cron (`005`; `jobs.sweep_inactive_leads` calls the same function on the local container) + `/leads/at-risk`; emits `lead.went_cold` | `pytest` (at-risk path); `verify_db.py`; `cron.job_run_details` |
+| — | Agent logins | `scripts/provision_agent_users.py` — one Auth user per real agent via the Admin API, bound to `core.agent.auth_user_id` (DECISIONS §15) | `--dry-run`, then `GET /me` → 200 with a password-grant token |
+| — | Hosting at $0 | `render.yaml` (free web service, Docker, `/health`), jobs in pg_cron so the container may sleep (DECISIONS §14) | `/health` 200 on the public URL; `scripts/smoke.sh` against it |
+
+**Línea 1 (calendar) answers, 2026-09-03:** 1.1 — `GET /agents/{id}/slots` already
+subtracts appointments in `PENDING_CONFIRMATION`/`CONFIRMED`/`RESCHEDULED`
+(`services/availability.compute_slots` shares `_BLOCKING` with the overlap check;
+proven by `tests/test_availability.py::test_a_busy_block_removes_the_overlapping_slot[appointment]`,
+not by `verify_db.py`). 1.4 — `ENFORCE_AVAILABILITY` is **false** on every
+environment and must stay false until agents publish real rules; default weekly
+rules (Mon–Fri 09–12, 14–18) were seeded for the 48 real agents so `/slots` is
+demonstrable.
 
 ---
 
