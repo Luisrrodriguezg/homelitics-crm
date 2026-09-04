@@ -27,12 +27,16 @@ services:
         value: INFO
       - key: SUPABASE_JWT_AUDIENCE
         value: authenticated
-      # Secrets: set in the Render dashboard, never in this file.
-      - key: DATABASE_URL          # transaction pooler, port 6543, postgresql+asyncpg://
-        sync: false
+      # No frontend yet, so any origin may call the API. Replace with the
+      # frontend's URL (comma-separated if several) once one exists.
+      - key: CORS_ORIGINS
+        value: "*"
       - key: SUPABASE_PROJECT_REF
-        sync: false
-      - key: SUPABASE_JWT_SECRET   # leave EMPTY on modern (JWKS) projects
-        sync: false
-      - key: CORS_ORIGINS          # the frontend origin(s), comma-separated — not *
+        value: msmpbounvqtfobcfyffr   # public, it is in every Supabase URL
+      - key: SUPABASE_JWT_SECRET      # leave EMPTY on modern (JWKS) projects
+        value: ""
+      # The one real secret: set it in the Render dashboard, never in this file.
+      # Same value as DATABASE_URL in .env (transaction pooler, port 6543,
+      # postgresql+asyncpg://...). It contains the database password.
+      - key: DATABASE_URL
         sync: false

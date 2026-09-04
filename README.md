@@ -325,10 +325,12 @@ it does). No card needed.
 1. Push the branch. Render → **New → Blueprint** → pick the repo. It reads
    [`render.yaml`](render.yaml): Docker runtime, free plan, Oregon (same coast as
    the `aws-0-us-west-2` pooler), health check on `/health`.
-2. Fill the four secrets it asks for: `DATABASE_URL` (transaction pooler, 6543,
-   `postgresql+asyncpg://`), `SUPABASE_PROJECT_REF`, `SUPABASE_JWT_SECRET`
-   (leave empty on a JWKS project), `CORS_ORIGINS` (the frontend origin, not `*`).
-   `ENABLE_SCHEDULER=false` and `PORT=8000` are fixed in the blueprint.
+2. It asks for exactly one value: `DATABASE_URL` — copy it from `.env`
+   (transaction pooler, port 6543, `postgresql+asyncpg://...`; it contains the
+   database password, which is why it is not in the file). Everything else is
+   preset in the blueprint: project ref, empty JWT secret (JWKS project),
+   `CORS_ORIGINS=*` (there is no frontend yet — replace with its URL when there
+   is), `ENABLE_SCHEDULER=false`, `PORT=8000`.
 3. Deploy. Then:
    ```bash
    curl -s https://<service>.onrender.com/health
