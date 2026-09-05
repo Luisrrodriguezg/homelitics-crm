@@ -3,7 +3,7 @@
 The job *bodies* live in Postgres (`core.sweep_inactive_leads`,
 `events.relay_domain_events`) so that one implementation serves two runners:
 
-  * Supabase: pg_cron calls them directly (hourly / every 30 s). The API
+  * Supabase: pg_cron calls them directly (hourly / every 2 min). The API
     container can sleep; the funnel keeps ticking. docs/DECISIONS.md §14.
   * Local compose (plain postgres:17-alpine, no pg_cron): this module's
     APScheduler calls the same functions on the FastAPI lifespan.

@@ -32,8 +32,9 @@ class Settings(BaseSettings):
     inactivity_hours: int = Field(default=72, alias="INACTIVITY_HOURS")
     scheduler_interval_minutes: int = Field(default=60, alias="SCHEDULER_INTERVAL_MINUTES")
     # The domain-event outbox relay (jobs.relay_events). Runs on the same
-    # ENABLE_SCHEDULER gate as the inactivity sweep.
-    event_relay_seconds: int = Field(default=30, alias="EVENT_RELAY_SECONDS")
+    # ENABLE_SCHEDULER gate as the inactivity sweep. Mirrors the pg_cron
+    # 'homelitics_relay' cadence (every 2 min) — change both together.
+    event_relay_seconds: int = Field(default=120, alias="EVENT_RELAY_SECONDS")
     # Agents publish availability in local time; slot maths happens in this zone.
     app_timezone: str = Field(default="America/Bogota", alias="APP_TIMEZONE")
     # When true, request_visit rejects a slot the agent has not published.

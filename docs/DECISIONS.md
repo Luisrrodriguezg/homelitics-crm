@@ -258,7 +258,7 @@ Re-run `scripts/measure_views.py` to check.
 
 **Decision.** The inactivity sweep and the outbox relay are SQL functions
 (`core.sweep_inactive_leads(p_hours)`, `events.relay_domain_events(p_batch)`)
-scheduled by pg_cron inside Supabase — hourly and every 30 s. `app/jobs.py` keeps
+scheduled by pg_cron inside Supabase — hourly and every 2 min. `app/jobs.py` keeps
 an APScheduler that calls the *same* functions, but it is only for the local
 compose container (plain `postgres:17-alpine` ships no pg_cron). On Supabase
 `ENABLE_SCHEDULER` must be false; `config.py` warns if it is not.

@@ -103,7 +103,7 @@ exclusively, never from `core` — which is why **every** one of the five expose
 |---|---|
 | Appointment exclusion constraint | Double-booking prevention is FastAPI's job: query `idx_appointment_agent` for overlaps before insert. Removed because `EXCLUDE USING gist` with an inline `tstzrange` isn't IMMUTABLE and won't create. |
 | `consent` table | HU-20 is Won't-this-sprint. Synthetic data ⇒ no data subjects ⇒ no consent obligation during development. |
-| Kafka / event bus | Sync calls + scheduled jobs. `events.domain_event` (`004`) is a transactional outbox: `services/events.emit` writes in the caller's transaction, `events.relay_domain_events()` (`005`, pg_cron every 30 s) publishes. The event *data model* survives; only the broker is gone. |
+| Kafka / event bus | Sync calls + scheduled jobs. `events.domain_event` (`004`) is a transactional outbox: `services/events.emit` writes in the caller's transaction, `events.relay_domain_events()` (`005`, pg_cron every 2 min) publishes. The event *data model* survives; only the broker is gone. |
 | Always-on host | Jobs run in pg_cron (`005`), so the container may sleep. Free Render deploy via `render.yaml`. `ENABLE_SCHEDULER` is local-only. `docs/DECISIONS.md` §14. |
 | Materialized views | Plain views. Always fresh, no refresh job. Backed by measurement — see `docs/DECISIONS.md` §13 (`scripts/measure_views.py`), p95 ≤ 133 ms. Revisit only if one crosses ~500 ms. |
 | `updated_at` triggers | The API sets `updated_at` on write. |

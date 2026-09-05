@@ -271,7 +271,7 @@ Two jobs, both SQL functions from `migrations/005_cron_jobs.sql`, scheduled by
 | job | schedule | does |
 |---|---|---|
 | `core.sweep_inactive_leads(72)` | hourly | open leads with no OUTBOUND contact in 72 h and no PENDING task → follow-up task + NOTE + `lead.went_cold` |
-| `events.relay_domain_events()` | every 30 s | publishes the outbox (below); `lead.created` → first-touch follow-up |
+| `events.relay_domain_events()` | every 2 min | publishes the outbox (below); `lead.created` → first-touch follow-up |
 
 Because the jobs live in Postgres, the API container may sleep — that is what
 makes the free Render deploy below viable. **`ENABLE_SCHEDULER` must stay `false`
@@ -296,7 +296,7 @@ the only grant `authenticated` holds anywhere in our schemas.
 | var | default | meaning |
 |---|---|---|
 | `ENABLE_SCHEDULER` | `false` | in-process runner for the two job functions. **Local profile only** — pg_cron owns them on Supabase |
-| `EVENT_RELAY_SECONDS` | `30` | relay interval for that in-process runner |
+| `EVENT_RELAY_SECONDS` | `120` | relay interval for that in-process runner (mirrors the pg_cron cadence) |
 | `APP_TIMEZONE` | `America/Bogota` | zone the availability slot maths runs in |
 | `ENFORCE_AVAILABILITY` | `false` | when true, `request_visit` rejects an unpublished slot. Keep false until agents publish real rules |
 | `DEV_AUTH_BYPASS` | `false` | local only — identity from `X-Dev-Agent-Id`; app refuses to start against a non-local DB |

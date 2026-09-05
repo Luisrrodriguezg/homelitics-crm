@@ -602,7 +602,7 @@ is asleep on a free host. Nothing to configure on the API side.
 | job | runs | what it does |
 |---|---|---|
 | `core.sweep_inactive_leads(72)` | hourly (`0 * * * *`) | for every non-terminal lead with no `OUTBOUND` interaction in 72 h and no `PENDING` task: raise a follow-up task (due +24 h) + an `OUTBOUND` `NOTE`, and emit `lead.went_cold`. Idempotent — a lead with a `PENDING` task is skipped. Max 500 leads per run |
-| `events.relay_domain_events()` | every 30 s | publish unpublished `events.domain_event` rows (see §8) |
+| `events.relay_domain_events()` | every 2 min | publish unpublished `events.domain_event` rows (see §8) |
 
 On the **local compose profile** there is no pg_cron, so the API's in-process
 scheduler (`ENABLE_SCHEDULER=true`, `app/jobs.py`) calls the same two functions
