@@ -6,7 +6,7 @@ triggers them. `emit` does exactly that — it adds the outbox row to the
 business transaction commits.
 
 Publishing is the job of `events.relay_domain_events()` in Postgres
-(migrations/005): pg_cron runs it every 30 s on Supabase, and `jobs.relay_events`
+(migrations/005): pg_cron runs it every 2 min on Supabase, and `jobs.relay_events`
 runs it from the in-process scheduler on the local container. `relay_events`
 below is the Python entry point to that same function.
 """

@@ -621,7 +621,7 @@ begin
       $job$ select core.sweep_inactive_leads(72) $job$
     );
     perform cron.schedule(
-      'homelitics_relay', '30 seconds',
+      'homelitics_relay', '*/2 * * * *',
       $job$ select events.relay_domain_events() $job$
     );
 
