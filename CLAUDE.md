@@ -237,11 +237,13 @@ default Mon–Fri availability for the 48 agents) — the exact SQL is in the
 session's `phase0_cleanup.sql`; `scripts/purge_test_rows.sql` is the reusable part.
 `tests/conftest.py` now refuses a non-local `DATABASE_URL` so debris cannot recur.
 
-Migrations `001`–`007` are applied to the live DB; `scripts/verify_db.py` is green
+Migrations `001`–`008` are applied to the live DB; `scripts/verify_db.py` is green
 (28/28). `007` went on 2026-09-10 via the Supabase connector's `apply_migration`;
 its new response definition moved 96 leads to `never_answered` (the 72h sweep's
 auto-note had been counting as their first response). Ground truth held: slow
 28.8h vs fast 2.0h.
+`008` went on 2026-09-11 the same way (column + unique index + `clients:create`
+granted to `ai-agent`; no rows changed); `verify_db.py` 30/30.
 Worktrees have no `.env`; scripts use the main checkout's
 `/Users/luisrro/Desktop/Proyecto Home/.env`.
 
@@ -250,10 +252,9 @@ The AI agent is provisioned: service account `ai-agent` exists with an
 
 ### Outstanding
 
-- **Migration `008`:** must be applied to `homelitics` **before** the code that
-  uses it merges — Render auto-deploys, and the `Person` model selects
-  `telegram_user_id`, so without the column every query loading a person fails.
-  It also grants `clients:create` to `ai-agent`.
+- **Deploy order for future migrations:** apply to `homelitics` **before**
+  merging code that uses them — Render auto-deploys, and a model column the DB
+  lacks breaks every query on that table.
 - **The Telegram bot itself** lives outside this repo. Flow per message:
   `POST /clients` (with `telegram_user_id`) → `POST /leads` → later messages as
   `POST /leads/{id}/interactions`. `docs/API_GUIDE.md` §2d.
