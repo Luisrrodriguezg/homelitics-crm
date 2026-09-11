@@ -41,8 +41,8 @@ Target metrics (from the backlog):
   so re-running wipes and recreates. Paste into Supabase SQL Editor and Run.
   Click "Run without RLS" on the warning popup. Run `scripts/verify_db.py` first —
   if the live schema has drifted, this file will silently destroy it.
-- `migrations/` — `001_schema.sql` (the baseline) then `002`–`007` (additive,
-  idempotent; all applied to `homelitics`). `schema-2.sql` is kept equal to 001 + … + 007.
+- `migrations/` — `001_schema.sql` (the baseline) then `002`–`008` (additive,
+  idempotent). `schema-2.sql` is kept equal to 001 + … + 008.
 - `render.yaml` — free Render deploy. `scripts/provision_agent_users.py` — one
   Auth login per real agent (Admin API), replaces hand-made users.
 - `seed.py` — deterministic synthetic data generator.
@@ -52,7 +52,8 @@ Target metrics (from the backlog):
 
 ## Schema (24 tables, 4 schemas)
 
-**`pii`** — `person`. Every human lives here exactly once.
+**`pii`** — `person`. Every human lives here exactly once. `telegram_user_id`
+(`008`, UNIQUE) is how a returning Telegram contact is recognised.
 
 **`core`** (22) — `agency`, `agent`, `owner`, `client`, `property`, `listing`,
 `lead`, `lead_stage`, `lead_stage_transition`, `lost_reason`, `lead_lost_detail`,
@@ -203,10 +204,22 @@ writes never stop the response clock. Provision with
 `scripts/provision_ai_agent.sql` (re-run after every re-seed);
 `provision_agent_users.py` skips `AI_AGENT` rows.
 
+### Client registration (008)
+
+`POST /clients` (scope `clients:create`) creates the `client_id` a lead needs.
+With `telegram_user_id`: find-or-create through `UNIQUE pii.person(telegram_user_id)`
++ `ON CONFLICT` — 201 new, 200 existing, stored name/phone never overwritten.
+Without it: always a new client. **Nothing else is matched on** — on live data
+names and emails collide between strangers, and phones are the seeder's 92
+reformatted duplicate pairs (`docs/DECISIONS.md` §18). `core.client` has no
+agency, so `services/client` is the one service function without an
+`agency_id`; the guard is that `ClientOut` returns only `id` + `created_at`,
+never PII.
+
 ### Local one-command dev
 
 `docker compose --profile local up --build` — throwaway `postgres:17-alpine`,
-`migrations/*.sql` auto-applied on first boot (001→007), one-shot `seed`
+`migrations/*.sql` auto-applied on first boot (001→008), one-shot `seed`
 (`--scale small --seed 42`), API with `DEV_AUTH_BYPASS=true` (identity from
 `X-Dev-Agent-Id`; the app refuses to start with the bypass on against a
 non-local DB). No `.env`, no Supabase.
@@ -224,20 +237,27 @@ default Mon–Fri availability for the 48 agents) — the exact SQL is in the
 session's `phase0_cleanup.sql`; `scripts/purge_test_rows.sql` is the reusable part.
 `tests/conftest.py` now refuses a non-local `DATABASE_URL` so debris cannot recur.
 
-Migrations `001`–`007` are applied to the live DB; `scripts/verify_db.py` is green
+Migrations `001`–`008` are applied to the live DB; `scripts/verify_db.py` is green
 (28/28). `007` went on 2026-09-10 via the Supabase connector's `apply_migration`;
 its new response definition moved 96 leads to `never_answered` (the 72h sweep's
 auto-note had been counting as their first response). Ground truth held: slow
 28.8h vs fast 2.0h.
-`.env` is filled and working in this worktree.
+`008` went on 2026-09-11 the same way (column + unique index + `clients:create`
+granted to `ai-agent`; no rows changed); `verify_db.py` 30/30.
+Worktrees have no `.env`; scripts use the main checkout's
+`/Users/luisrro/Desktop/Proyecto Home/.env`.
+
+The AI agent is provisioned: service account `ai-agent` exists with an
+`AI_AGENT` row in all 6 agencies, and the service-account code is on `main`.
 
 ### Outstanding
 
-- **AI agent login:** `007` is applied; the service-account code is not on
-  `main` yet (the live API has no `X-Agency-Id`), and the service account itself
-  does not exist. Merge (Render auto-deploys), create the bot's Auth user, run
-  `scripts/provision_ai_agent.sql` with its UUID. Numbered runbook:
-  `docs/API_GUIDE.md` §2d "Set it up, step by step".
+- **Deploy order for future migrations:** apply to `homelitics` **before**
+  merging code that uses them — Render auto-deploys, and a model column the DB
+  lacks breaks every query on that table.
+- **The Telegram bot itself** lives outside this repo. Flow per message:
+  `POST /clients` (with `telegram_user_id`) → `POST /leads` → later messages as
+  `POST /leads/{id}/interactions`. `docs/API_GUIDE.md` §2d.
 - **Logins:** `python scripts/provision_agent_users.py` (needs
   `SUPABASE_SERVICE_ROLE_KEY` + `DEMO_AGENT_PASSWORD` in `.env`). Until then every
   authenticated request returns 403; `DEV_AUTH_BYPASS` sidesteps this locally.

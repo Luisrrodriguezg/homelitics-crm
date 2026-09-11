@@ -390,3 +390,45 @@ additive.
 **Revisit if** a second kind of non-human principal appears (a webhook
 integration, say) — then `scopes` probably moves off `service_account` into a
 role table — or if the budget needs to be exact rather than a brake.
+
+---
+
+## 18. A client is registered once per Telegram account, and matched on nothing else (008_telegram_clients.sql)
+
+**Decision.** `POST /clients` creates the client a lead needs. With a
+`telegram_user_id` it is find-or-create: `pii.person.telegram_user_id` is
+UNIQUE and the insert goes through `ON CONFLICT DO NOTHING`, the same race-free
+pattern as lead dedup (§4). Without one, every call creates a new client. The
+bot is Telegram-only; the no-id path exists for walk-ins, calls and the app,
+and costs nothing because it is the same insert with a NULL key.
+
+**Why only the Telegram id.** Measured on the live data (6,386 clients,
+2026-09-11):
+
+| Candidate | Live data | Verdict |
+|---|---|---|
+| name | 228 groups of different people sharing one | no |
+| email | 139 groups (up to 5) sharing one, always with different names and phones — faker collisions between strangers | no — would merge strangers, and a UNIQUE index would not even build |
+| phone, digits only | 92 pairs, same name, reformatted number (`3007437237` / `300-743-7237`) — the seeder's deliberate duplicate fixtures | the only plausible key, but a UNIQUE index fails on the fixtures |
+| Telegram user id | assigned by Telegram, one per account, no formatting | yes |
+
+A fuzzy match done in Python instead would also race, which is what §4 exists
+to prevent. The consequence is accepted: someone registered by hand who later
+writes to the bot becomes a second client — the same duplicate-client case the
+seed already models for data-quality work.
+
+**Why on `pii.person`, not `core.client`.** A Telegram id identifies a human.
+Right-to-erasure is one UPDATE on `pii.person` (rule 1); on `core.client` the id
+would survive anonymisation. Erasure must null it together with the name.
+
+**The one service function with no `agency_id`.** `core.client` has no agency —
+a lead is what ties a client to one — so there is nothing to filter on. The
+guard is the response: `ClientOut` is `id` + `created_at` only. Echoing the
+stored name or phone would let agency A read the contact details of someone who
+only ever wrote to agency B. What leaks is one bit — 200 vs 201 says whether a
+Telegram id is already a client — which is acceptable at MVP scale. Creating a
+client is not counted in the bot's hourly write budget and emits no event.
+
+**Revisit if** another channel needs dedup: add a digits-only phone column with
+a UNIQUE index — after deciding what happens to the 92 fixture pairs, which are
+ground truth for the data-quality tests.

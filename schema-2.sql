@@ -27,8 +27,14 @@ create table pii.person (
   national_id   text,
   anonymized_at timestamptz,
   created_at    timestamptz not null default now(),
-  updated_at    timestamptz not null default now()
+  updated_at    timestamptz not null default now(),
+  -- 008: a Telegram account identifies one client (POST /clients dedups on it).
+  -- Erasure must null it along with the rest of the row.
+  telegram_user_id bigint
 );
+
+-- NULLs are distinct, so everyone who never used the bot coexists
+create unique index uq_person_telegram_user_id on pii.person (telegram_user_id);
 
 -- ============================================================
 -- core: org & roles
@@ -59,7 +65,7 @@ create table core.service_account (
   name               text not null unique,
   auth_user_id       uuid not null unique,
   scopes             text[] not null
-                     default '{leads:create,leads:transition,interactions:write,tasks:write,visits:request}',
+                     default '{leads:create,leads:transition,interactions:write,tasks:write,visits:request,clients:create}',
   hourly_write_limit integer not null default 300 check (hourly_write_limit > 0),
   active             boolean not null default true,
   created_at         timestamptz not null default now(),
