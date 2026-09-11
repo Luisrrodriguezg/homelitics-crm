@@ -85,6 +85,166 @@ so Swagger reloads the spec.)
 passes the acting agent in an `X-Test-Agent-Id` header — auth is bypassed so the
 tests exercise *authorization* (agency scoping), not *authentication*.
 
+### 2d. Service accounts — an AI agent across every agency
+
+A human login maps to one agent in one agency. An AI agent needs all of them,
+so it authenticates as a **service account** (`core.service_account`, migration
+`007`) and names the agency per request:
+
+```
+Authorization: Bearer <access_token>
+X-Agency-Id: <core.agency UUID>
+```
+
+The token's `sub` matches `core.service_account.auth_user_id`; the header picks
+which of that account's per-agency `AI_AGENT` rows to act as. From there the
+request is indistinguishable from a human's in that agency — same filters, same
+404s — except for the guardrails below. The bot **never owns a lead**: a lead it
+creates belongs to the listing's agent, and it cannot be a reassignment target.
+`/me` reports `"role": "AI_AGENT"`.
+
+#### Set it up, step by step
+
+Steps 1–5 are done **once**, by whoever owns the Supabase project. Steps 6–8
+are what the bot does **every session**. Step 9 is what to do when a call
+fails.
+
+**One-time setup**
+
+1. **Deploy the code.** Service-account login lives in the API, so the code
+   that added it must be on `main`. Render redeploys by itself on every push
+   (`autoDeploy: true` in `render.yaml`). This prints `X-Agency-Id` once the
+   new code is serving (the first request after 15 min idle takes ~30–60 s):
+
+   ```bash
+   curl -s https://homelitics-api.onrender.com/openapi.json | grep -o X-Agency-Id | head -1
+   ```
+
+2. **Apply migration `007` to the database.** Already done on `homelitics`
+   (2026-09-10). On a fresh project, paste `migrations/007_ai_agents.sql` into
+   the Supabase SQL Editor and Run; `python scripts/verify_db.py` should then
+   show the four `(007)` checks as PASS.
+
+3. **Create the bot's login.** Supabase dashboard → **Authentication → Users →
+   Add user → Create new user**:
+   - email: e.g. `ai-agent@homelitics.test` — a `.test` address, no mail is
+     ever sent;
+   - password: long and random (`openssl rand -base64 32`);
+   - tick **Auto Confirm User**.
+
+   Copy the new user's **UUID** (the `id` column of the users list).
+
+4. **Create the service account.** Open `scripts/provision_ai_agent.sql`, set
+   `v_auth` to that UUID (and `v_name` if you want a name other than
+   `ai-agent`), paste the whole file into the SQL Editor, Run. It creates the
+   `core.service_account` row with the default scopes plus one `AI_AGENT` row
+   per agency, and ends by listing every agency with its `agency_id` — the
+   values the bot sends as `X-Agency-Id`. Safe to re-run: it only adds what is
+   missing.
+
+5. **Give the bot its configuration — and nothing more:**
+
+   | Setting | Value | Where it comes from |
+   |---|---|---|
+   | `API_BASE` | `https://homelitics-api.onrender.com` | README "Live deployment" |
+   | `SUPABASE_URL` | `https://<project-ref>.supabase.co` | Dashboard → Project Settings → API |
+   | `SUPABASE_ANON_KEY` | the anon / publishable key | same page — public by design |
+   | `BOT_EMAIL`, `BOT_PASSWORD` | from step 3 | a secret store, never the repo |
+   | agency ids | the list printed in step 4 | |
+
+   Never the service-role key, never `DATABASE_URL`: the bot only ever talks to
+   the API.
+
+**What the bot does**
+
+6. **Get a token.** It lasts one hour:
+
+   ```bash
+   curl -s -X POST "$SUPABASE_URL/auth/v1/token?grant_type=password" \
+     -H "apikey: $SUPABASE_ANON_KEY" -H 'Content-Type: application/json' \
+     -d "{\"email\":\"$BOT_EMAIL\",\"password\":\"$BOT_PASSWORD\"}"
+   # -> {"access_token": "...", "refresh_token": "...", "expires_in": 3600, ...}
+   ```
+
+   Before it expires, trade the refresh token for a new pair: same URL with
+   `grant_type=refresh_token` and body `{"refresh_token": "..."}`. A refresh
+   token works once — keep the new one it returns.
+
+7. **Check the identity**, once per agency:
+
+   ```bash
+   curl -s $API_BASE/me -H "Authorization: Bearer $TOKEN" -H "X-Agency-Id: $AGENCY_ID"
+   # -> {"role": "AI_AGENT", "agency_id": "<AGENCY_ID>", "full_name": "AI Assistant (ai-agent)", ...}
+   ```
+
+8. **Work leads.** Every call carries both headers:
+
+   ```bash
+   H=(-H "Authorization: Bearer $TOKEN" -H "X-Agency-Id: $AGENCY_ID" -H 'Content-Type: application/json')
+
+   # a client wrote in about a listing -> lead (201; 200 if the thread already exists)
+   curl -s "${H[@]}" $API_BASE/leads \
+     -d '{"client_id":"<uuid>","listing_id":"<uuid>","source_channel":"TELEGRAM","message":"¿Sigue disponible?"}'
+
+   # the bot answers, then books the visit
+   curl -s "${H[@]}" $API_BASE/leads/$LEAD/interactions \
+     -d '{"direction":"OUTBOUND","channel":"TELEGRAM","body":"¡Hola! Sí, sigue disponible."}'
+   curl -s "${H[@]}" $API_BASE/leads/$LEAD/transitions \
+     -d '{"to_stage":"VISIT_SCHEDULED","note":"Visita agendada por el asistente"}'
+   ```
+
+   Listings are agency-scoped like everything else: a listing from another
+   agency is a 404. Call `GET /listings` once per agency id, keep a
+   listing → agency map, and send the matching header. The lead is owned by
+   the listing's human agent, not the bot.
+
+9. **When a call fails:**
+
+   | Response | Meaning | Fix |
+   |---|---|---|
+   | **401** | token missing, expired, or from another Supabase project | get a new one (step 6) |
+   | **400** | no `X-Agency-Id`, or not a UUID | send the header |
+   | **403** "not linked to an agent" | no service account for this login — step 4 not run, wrong UUID, or step 1 not deployed yet | run step 4 with the UUID from step 3; check step 1 |
+   | **403** "no AI_AGENT row in that agency" | the database was re-seeded, or the agency is new | re-run step 4 |
+   | **403** "deactivated" | the kill switch is on (below) | turn it back on |
+   | **403** "lacks the '…' scope" | that write is not granted | grant it (below), if it should be |
+   | **404** | the lead/listing belongs to a different agency | use that agency's id |
+   | **429** | hourly write budget spent | wait; raise `hourly_write_limit` if the volume is legitimate |
+
+**Rotating the password.** Create a new Auth user (step 3), re-run step 4 with
+its UUID — the script re-points the existing `ai-agent` account at it — give the
+bot the new credentials, then delete the old user.
+
+**Scopes.** Every write route names a scope; the account's `scopes` array must
+contain it or the call is **403**. Reads need no scope. Humans are never scope
+checked. Default grant: `leads:create`, `leads:transition`, `interactions:write`,
+`tasks:write`, `visits:request`. Not granted by default: `leads:close` (moving
+a lead to `WON`/`LOST` — on top of `leads:transition`), `visits:manage`
+(`PATCH /appointments/{id}`), `visits:feedback`, `availability:write`,
+`listings:views`. Reassign stays `TEAM_ADMIN`-only, so a bot can never do it.
+Grant a scope with one UPDATE, no deploy:
+
+```sql
+update core.service_account
+   set scopes = array_append(scopes, 'leads:close'), updated_at = now()
+ where name = 'ai-agent';
+```
+
+**Budget.** `hourly_write_limit` (default 300) caps transitions + interactions
+the account writes in any rolling hour, across all its agencies; past it every
+write returns **429** with `Retry-After`. It exists to stop a runaway loop, not
+to meter usage. **Kill switch:** `update core.service_account set active = false
+where name = 'ai-agent'` — 403 on the bot's next request. `core.agent.active =
+false` on one bot row turns it off for that agency only.
+
+**Metrics.** An *agent response* is an `OUTBOUND` `MESSAGE` or `CALL` written
+by a human. Anything an `AI_AGENT` writes, and any `NOTE` / `STATUS_CHANGE`
+(including the 72h sweep's own auto-note), sits on the timeline but does not
+stop the response clock in `analytics.agent_response_time` /
+`analytics.lead_outcome`, and does not count as contact for `/leads/at-risk`
+or the sweep. A lead the bot is chatting on that no human has answered still
+shows as unanswered — which is the point.
+
 ---
 
 ## 3. Conventions
@@ -659,11 +819,13 @@ docker compose exec db psql -U postgres -c \
 | **200** | OK / dedup hit | `POST /leads` for an existing `(client, listing)` |
 | **201** | Created | new lead, transition, appointment, task, interaction, feedback, availability |
 | **204** | No content | `DELETE` of an availability rule / time-off entry |
+| **400** | Bad request | service-account token without `X-Agency-Id`, or a non-UUID header |
 | **401** | Not authenticated | missing/expired token; `DEV_AUTH_BYPASS` on but no `X-Dev-Agent-Id` |
-| **403** | Authenticated, not allowed | token not bound to an agent; non-`TEAM_ADMIN` calling reassign; deactivated agent |
+| **403** | Authenticated, not allowed | token not bound to an agent; non-`TEAM_ADMIN` calling reassign; deactivated agent or service account; service account lacks the route's scope |
 | **404** | Not found *or not yours* | lead/listing/appointment/agent in another agency; unknown id; using another agency's listing on `POST /leads` |
-| **409** | Conflict | illegal/terminal transition; overlapping visit; terminal appointment; feedback on a non-`COMPLETED` visit; reassign to a deactivated / current agent |
+| **409** | Conflict | illegal/terminal transition; overlapping visit; terminal appointment; feedback on a non-`COMPLETED` visit; reassign to a deactivated / current / AI agent |
 | **422** | Unprocessable | past `scheduled_at`; `LOST` without `lost_reason`; unknown enum code; `from >= to` on slots; Pydantic body validation |
+| **429** | Budget spent | a service account past its `hourly_write_limit`; retry after the hour |
 | **503** | DB unreachable | `/health` when Postgres is down |
 
 Body shape: `{"detail": "..."}` (string) for app errors, or

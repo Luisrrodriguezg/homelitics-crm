@@ -123,10 +123,13 @@ if settings.dev_auth_bypass:
         )
         comps = schema.get("components", {}).get("securitySchemes", {})
         comps.pop("HTTPBearer", None)
+        # X-Agency-Id only matters for service-account tokens, and the bypass
+        # never looks at tokens. Scheme names are set in app/deps.py.
+        comps.pop("AgencyId", None)
         for path in schema.get("paths", {}).values():
             for op in path.values():
                 if isinstance(op, dict) and "security" in op:
-                    op["security"] = [{"APIKeyHeader": []}]
+                    op["security"] = [{"DevAgentId": []}]
         app.openapi_schema = schema
         return schema
 

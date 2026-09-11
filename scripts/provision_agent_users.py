@@ -77,6 +77,7 @@ AGENTS_SQL = """
     join core.agency g on g.id = a.agency_id
     join pii.person p  on p.id = a.person_id
     where a.active
+      and a.role <> 'AI_AGENT'   -- bots log in through core.service_account (007)
       and g.name not like 'pytest-%%'
       and (%(agency_id)s::uuid is null or a.agency_id = %(agency_id)s::uuid)
     order by g.name, a.role = 'TEAM_ADMIN' desc, p.full_name

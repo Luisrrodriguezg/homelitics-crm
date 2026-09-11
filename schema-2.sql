@@ -43,7 +43,7 @@ create table core.agent (
   id         uuid primary key default gen_random_uuid(),
   person_id  uuid not null references pii.person(id),
   agency_id  uuid not null references core.agency(id),
-  role       text not null default 'AGENT' check (role in ('AGENT','TEAM_ADMIN')),
+  role       text not null default 'AGENT' check (role in ('AGENT','TEAM_ADMIN','AI_AGENT')),
   active     boolean not null default true,
   auth_user_id uuid,   -- Supabase auth.users.id; populated by scripts/bind_agents.py
   created_at timestamptz not null default now()
@@ -51,6 +51,28 @@ create table core.agent (
 
 -- most agents are unbound (null); Postgres allows repeated nulls under a unique index
 create unique index idx_agent_auth_user_id on core.agent (auth_user_id);
+
+-- 007: the credential behind an AI agent. One Supabase login; one AI_AGENT row
+-- per agency hangs off it.
+create table core.service_account (
+  id                 uuid primary key default gen_random_uuid(),
+  name               text not null unique,
+  auth_user_id       uuid not null unique,
+  scopes             text[] not null
+                     default '{leads:create,leads:transition,interactions:write,tasks:write,visits:request}',
+  hourly_write_limit integer not null default 300 check (hourly_write_limit > 0),
+  active             boolean not null default true,
+  created_at         timestamptz not null default now(),
+  updated_at         timestamptz not null default now()
+);
+
+alter table core.agent add column service_account_id uuid references core.service_account(id);
+alter table core.agent add constraint agent_ai_agent_check
+  check ((role = 'AI_AGENT') = (service_account_id is not null)
+         and (role <> 'AI_AGENT' or auth_user_id is null));
+create unique index idx_agent_service_account_agency
+  on core.agent (service_account_id, agency_id)
+  where service_account_id is not null;
 
 create table core.owner (
   id         uuid primary key default gen_random_uuid(),
@@ -320,9 +342,14 @@ select l.agent_id,
 from core.lead l
 join core.agent ag on ag.id = l.agent_id
 left join lateral (
+  -- 007: an agent response is an OUTBOUND MESSAGE or CALL by a human. Notes,
+  -- stage-change notes and AI-agent replies are on the timeline only.
   select min(i.occurred_at) as first_outbound
   from core.interaction i
+  left join core.agent b on b.id = i.created_by
   where i.lead_id = l.id and i.direction = 'OUTBOUND'
+    and i.type in ('MESSAGE','CALL')
+    and b.role is distinct from 'AI_AGENT'
 ) fr on true
 group by l.agent_id, ag.agency_id;
 
@@ -372,7 +399,10 @@ join core.lead_stage ls on ls.code = l.current_stage
 left join lateral (
   select min(i.occurred_at) as first_outbound
   from core.interaction i
+  left join core.agent b on b.id = i.created_by
   where i.lead_id = l.id and i.direction = 'OUTBOUND'
+    and i.type in ('MESSAGE','CALL')
+    and b.role is distinct from 'AI_AGENT'
 ) fr on true
 left join lateral (
   select min(t.changed_at) as lost_at
@@ -532,7 +562,10 @@ begin
       and l.created_at < v_cutoff
       and coalesce(
             (select max(i.occurred_at) from core.interaction i
-              where i.lead_id = l.id and i.direction = 'OUTBOUND'),
+              left join core.agent b on b.id = i.created_by
+              where i.lead_id = l.id and i.direction = 'OUTBOUND'
+                and i.type in ('MESSAGE','CALL')
+                and b.role is distinct from 'AI_AGENT'),
             '-infinity'::timestamptz) < v_cutoff
       and not exists (select 1 from core.follow_up_task f
                        where f.lead_id = l.id and f.status = 'PENDING')

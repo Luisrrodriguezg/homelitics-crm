@@ -27,6 +27,12 @@ SubmittedBy = Literal["AGENT", "CLIENT"]
 
 TERMINAL_STAGES: frozenset[str] = frozenset({"WON", "LOST"})
 
+# What counts as an agent *response* for the response-time metric and the
+# inactivity sweep: an OUTBOUND interaction of one of these types, written by a
+# human. NOTE and STATUS_CHANGE are internal bookkeeping. Mirrors the predicate
+# in migrations/007_ai_agents.sql — keep the two in step.
+RESPONSE_TYPES: frozenset[str] = frozenset({"MESSAGE", "CALL"})
+
 # The legal funnel. Enforced in the service layer: the schema stores transitions
 # but does not constrain which edges are allowed.
 ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
@@ -48,7 +54,7 @@ class ORMModel(BaseModel):
 class AgentOut(ORMModel):
     id: uuid.UUID
     agency_id: uuid.UUID
-    role: Literal["AGENT", "TEAM_ADMIN"]
+    role: Literal["AGENT", "TEAM_ADMIN", "AI_AGENT"]
     active: bool
     full_name: str | None = None
     email: str | None = None

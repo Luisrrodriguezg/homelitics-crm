@@ -41,8 +41,8 @@ Target metrics (from the backlog):
   so re-running wipes and recreates. Paste into Supabase SQL Editor and Run.
   Click "Run without RLS" on the warning popup. Run `scripts/verify_db.py` first —
   if the live schema has drifted, this file will silently destroy it.
-- `migrations/` — `001_schema.sql` (the baseline) then `002`–`006` (additive,
-  idempotent; all applied to `homelitics`). `schema-2.sql` is kept equal to 001 + … + 006.
+- `migrations/` — `001_schema.sql` (the baseline) then `002`–`007` (additive,
+  idempotent; all applied to `homelitics`). `schema-2.sql` is kept equal to 001 + … + 007.
 - `render.yaml` — free Render deploy. `scripts/provision_agent_users.py` — one
   Auth login per real agent (Admin API), replaces hand-made users.
 - `seed.py` — deterministic synthetic data generator.
@@ -50,14 +50,15 @@ Target metrics (from the backlog):
 - `app/` — the FastAPI service. `README.md` covers setup and the EC2 runbook;
   `docs/DECISIONS.md` records the structural choices and why.
 
-## Schema (21 tables, 4 schemas)
+## Schema (24 tables, 4 schemas)
 
 **`pii`** — `person`. Every human lives here exactly once.
 
-**`core`** (19) — `agency`, `agent`, `owner`, `client`, `property`, `listing`,
+**`core`** (22) — `agency`, `agent`, `owner`, `client`, `property`, `listing`,
 `lead`, `lead_stage`, `lead_stage_transition`, `lost_reason`, `lead_lost_detail`,
 `interaction`, `appointment`, `objection`, `visit_feedback`, `follow_up_task`,
-`assignment_audit`, `offer`, `deal`
+`assignment_audit`, `offer`, `deal`, `agent_availability`, `agent_time_off`
+(`003`), `service_account` (`007` — the credential behind an AI agent)
 
 **`events`** — `property_view` (append-only, one row per listing page view)
 
@@ -181,10 +182,31 @@ relay (`jobs.relay_events`, `on_lead_created` → first-touch follow-up).
 examples, the event model, an end-to-end walkthrough). `docs/AC_COVERAGE.md` is
 the AC → implementation → verification matrix.
 
+### AI agents (007)
+
+An AI agent is a **service account** (`core.service_account`: one Supabase
+login, `scopes`, `hourly_write_limit`, `active`) plus one `core.agent` row per
+agency with `role='AI_AGENT'`. `get_current_agent` resolves the token to the
+account and `X-Agency-Id` to that agency's bot row, so every service function
+sees an ordinary `Agent` and nothing about tenancy changed. Reasoning and the
+four reasons a plain agent row fails: `docs/DECISIONS.md` §17.
+
+Rules that follow: a bot **never owns a lead** (listing's agent does; reassign
+refuses bots). Every write route carries `Depends(require_scope("..."))` —
+`tests/test_route_scopes.py` fails otherwise; humans skip the check. WON/LOST
+need `leads:close` on top of `leads:transition`. Bot writes are always
+attributed (`changed_by`/`created_by`) — that is what the hourly budget counts.
+**An agent response is an OUTBOUND MESSAGE or CALL by a human**
+(`schemas.RESPONSE_TYPES`; same predicate in `007` for the two views and the
+sweep) — notes, stage-change notes, the sweep's auto-note and anything a bot
+writes never stop the response clock. Provision with
+`scripts/provision_ai_agent.sql` (re-run after every re-seed);
+`provision_agent_users.py` skips `AI_AGENT` rows.
+
 ### Local one-command dev
 
 `docker compose --profile local up --build` — throwaway `postgres:17-alpine`,
-`migrations/*.sql` auto-applied on first boot (001→006), one-shot `seed`
+`migrations/*.sql` auto-applied on first boot (001→007), one-shot `seed`
 (`--scale small --seed 42`), API with `DEV_AUTH_BYPASS=true` (identity from
 `X-Dev-Agent-Id`; the app refuses to start with the bypass on against a
 non-local DB). No `.env`, no Supabase.
@@ -202,16 +224,26 @@ default Mon–Fri availability for the 48 agents) — the exact SQL is in the
 session's `phase0_cleanup.sql`; `scripts/purge_test_rows.sql` is the reusable part.
 `tests/conftest.py` now refuses a non-local `DATABASE_URL` so debris cannot recur.
 
-Migrations `001`–`006` are applied to the live DB; `scripts/verify_db.py` is green.
+Migrations `001`–`007` are applied to the live DB; `scripts/verify_db.py` is green
+(28/28). `007` went on 2026-09-10 via the Supabase connector's `apply_migration`;
+its new response definition moved 96 leads to `never_answered` (the 72h sweep's
+auto-note had been counting as their first response). Ground truth held: slow
+28.8h vs fast 2.0h.
 `.env` is filled and working in this worktree.
 
 ### Outstanding
 
+- **AI agent login:** `007` is applied; the service-account code is not on
+  `main` yet (the live API has no `X-Agency-Id`), and the service account itself
+  does not exist. Merge (Render auto-deploys), create the bot's Auth user, run
+  `scripts/provision_ai_agent.sql` with its UUID. Numbered runbook:
+  `docs/API_GUIDE.md` §2d "Set it up, step by step".
 - **Logins:** `python scripts/provision_agent_users.py` (needs
   `SUPABASE_SERVICE_ROLE_KEY` + `DEMO_AGENT_PASSWORD` in `.env`). Until then every
   authenticated request returns 403; `DEV_AUTH_BYPASS` sidesteps this locally.
-- **Hosting:** create the Render Blueprint from `render.yaml`, set the four
-  secrets, run `scripts/smoke.sh` against the public URL. README "Deploy for free".
+- **Hosting:** done — live at `https://homelitics-api.onrender.com` (Render
+  free tier, `autoDeploy: true`, so every merge to `main` redeploys). README
+  "Live deployment".
 
 ## Working style
 

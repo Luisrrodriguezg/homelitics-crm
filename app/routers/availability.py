@@ -8,9 +8,9 @@ the API — an agent in another agency is a 404.
 import uuid
 from datetime import datetime
 
-from fastapi import APIRouter, Query, Response, status
+from fastapi import APIRouter, Depends, Query, Response, status
 
-from app.deps import CurrentAgent, DbSession
+from app.deps import CurrentAgent, DbSession, require_scope
 from app.schemas import (
     AvailabilityCreate, AvailabilityOut, AvailabilityPatch, Message,
     SlotsOut, TimeOffCreate, TimeOffOut,
@@ -19,6 +19,10 @@ from app.services import availability as svc
 from app.services.availability import SLOT_MINUTES
 
 router = APIRouter(prefix="/agents", tags=["availability"])
+
+# One scope for the whole calendar: a bot editing when humans are reachable is
+# not something the default grant includes.
+_WRITE = [Depends(require_scope("availability:write"))]
 
 
 @router.get("/{agent_id}/availability", response_model=list[AvailabilityOut],
@@ -29,7 +33,8 @@ async def list_availability(agent_id: uuid.UUID, agent: CurrentAgent, session: D
 
 @router.post("/{agent_id}/availability", response_model=AvailabilityOut,
              status_code=status.HTTP_201_CREATED, summary="Add a weekly availability block",
-             responses={404: {"model": Message, "description": "Agent not in your agency"}})
+             responses={404: {"model": Message, "description": "Agent not in your agency"}},
+             dependencies=_WRITE)
 async def add_availability(
     agent_id: uuid.UUID, payload: AvailabilityCreate, agent: CurrentAgent, session: DbSession
 ):
@@ -40,7 +45,8 @@ async def add_availability(
 
 @router.patch("/{agent_id}/availability/{rule_id}", response_model=AvailabilityOut,
               summary="Edit a weekly availability block",
-              responses={404: {"model": Message, "description": "Rule or agent not found"}})
+              responses={404: {"model": Message, "description": "Rule or agent not found"}},
+              dependencies=_WRITE)
 async def patch_availability(
     agent_id: uuid.UUID, rule_id: uuid.UUID, payload: AvailabilityPatch,
     agent: CurrentAgent, session: DbSession,
@@ -51,7 +57,7 @@ async def patch_availability(
 
 
 @router.delete("/{agent_id}/availability/{rule_id}", status_code=status.HTTP_204_NO_CONTENT,
-               summary="Remove a weekly availability block")
+               summary="Remove a weekly availability block", dependencies=_WRITE)
 async def delete_availability(
     agent_id: uuid.UUID, rule_id: uuid.UUID, agent: CurrentAgent, session: DbSession
 ):
@@ -67,7 +73,8 @@ async def list_time_off(agent_id: uuid.UUID, agent: CurrentAgent, session: DbSes
 
 
 @router.post("/{agent_id}/time-off", response_model=TimeOffOut,
-             status_code=status.HTTP_201_CREATED, summary="Book time off")
+             status_code=status.HTTP_201_CREATED, summary="Book time off",
+             dependencies=_WRITE)
 async def add_time_off(
     agent_id: uuid.UUID, payload: TimeOffCreate, agent: CurrentAgent, session: DbSession
 ):
@@ -77,7 +84,7 @@ async def add_time_off(
 
 
 @router.delete("/{agent_id}/time-off/{off_id}", status_code=status.HTTP_204_NO_CONTENT,
-               summary="Cancel time off")
+               summary="Cancel time off", dependencies=_WRITE)
 async def delete_time_off(
     agent_id: uuid.UUID, off_id: uuid.UUID, agent: CurrentAgent, session: DbSession
 ):

@@ -1,9 +1,9 @@
 """Visit requests, confirmation flow and post-visit feedback."""
 import uuid
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, Depends, status
 
-from app.deps import CurrentAgent, DbSession
+from app.deps import CurrentAgent, DbSession, require_scope
 from app.schemas import (
     AppointmentCreate, AppointmentOut, AppointmentPatch, FeedbackCreate,
     FeedbackOut, Message,
@@ -43,6 +43,7 @@ async def list_appointments(lead_id: uuid.UUID, agent: CurrentAgent, session: Db
         409: {"model": Message, "description": "Overlaps a visit the agent already has"},
         422: {"model": Message, "description": "scheduled_at is in the past"},
     },
+    dependencies=[Depends(require_scope("visits:request"))],
 )
 async def request_visit(
     lead_id: uuid.UUID, payload: AppointmentCreate, agent: CurrentAgent, session: DbSession
@@ -79,6 +80,7 @@ async def get_appointment(appointment_id: uuid.UUID, agent: CurrentAgent, sessio
         409: {"model": Message, "description": "Already terminal, or the new slot overlaps"},
         422: {"model": Message, "description": "New scheduled_at is in the past"},
     },
+    dependencies=[Depends(require_scope("visits:manage"))],
 )
 async def patch_appointment(
     appointment_id: uuid.UUID, payload: AppointmentPatch,
@@ -101,6 +103,7 @@ async def patch_appointment(
         409: {"model": Message, "description": "The visit is not COMPLETED"},
         422: {"model": Message, "description": "Unknown objection code"},
     },
+    dependencies=[Depends(require_scope("visits:feedback"))],
 )
 async def add_feedback(
     appointment_id: uuid.UUID, payload: FeedbackCreate,

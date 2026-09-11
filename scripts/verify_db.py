@@ -5,7 +5,7 @@ Read-only verification of the live homelitics database.
 Two groups of checks:
 
   STRUCTURE  always runs. Asserts the live schema matches what schema-2.sql
-             (= migrations 001..006) declares. This is the guard that runs
+             (= migrations 001..007) declares. This is the guard that runs
              *before* anything destructive: schema-2.sql opens with
              `drop schema ... cascade`, so if the live DB has drifted, we stop.
 
@@ -35,6 +35,8 @@ CORE_TABLES = {
     "follow_up_task", "assignment_audit", "offer", "deal",
     # from 003_availability.sql
     "agent_availability", "agent_time_off",
+    # from 007_ai_agents.sql
+    "service_account",
 }
 ANALYTICS_VIEWS = {
     "funnel_daily", "agent_response_time", "listing_performance",
@@ -51,6 +53,8 @@ EXPECTED_INDEXES = {
     # from 003_availability.sql / 004_events_outbox.sql
     "idx_agent_availability_agent", "idx_agent_time_off_agent",
     "idx_domain_event_unpublished",
+    # from 007_ai_agents.sql
+    "idx_agent_service_account_agency",
 }
 
 
@@ -150,6 +154,25 @@ def verify_structure(cur):
               "TELEGRAM" in d and "WHATSAPP" not in d,
               "missing — apply migrations/006_telegram_channel.sql" if not d
               else ("" if "TELEGRAM" in d and "WHATSAPP" not in d else d))
+
+    # 007: AI agents. The role CHECK admits AI_AGENT, and "an agent response"
+    # is an OUTBOUND MESSAGE/CALL by a human — in both views and the sweep.
+    # Without that a bot moving stages (or the sweep's own note) flattens the
+    # response-time metric.
+    role_check = one(cur, """select pg_get_constraintdef(oid) from pg_constraint
+                             where conrelid = 'core.agent'::regclass and conname = 'agent_role_check'""") or ""
+    check("core.agent.role admits AI_AGENT (007)", "AI_AGENT" in role_check,
+          "apply migrations/007_ai_agents.sql" if "AI_AGENT" not in role_check else "")
+    for view in ("agent_response_time", "lead_outcome"):
+        vsrc = one(cur, "select pg_get_viewdef(%s::regclass, true)", (f"analytics.{view}",)) or ""
+        ok = "AI_AGENT" in vsrc and "MESSAGE" in vsrc
+        check(f"analytics.{view} counts only human MESSAGE/CALL as a response (007)", ok,
+              "notes or bot replies would count as agent responses" if not ok else "")
+    sweep = one(cur, """select pg_get_functiondef(p.oid) from pg_proc p
+                        join pg_namespace n on n.oid = p.pronamespace
+                        where n.nspname='core' and p.proname='sweep_inactive_leads'""") or ""
+    check("sweep_inactive_leads uses the same response definition (007)",
+          "AI_AGENT" in sweep and "MESSAGE" in sweep)
 
     # The reason running without RLS is safe: PostgREST simply cannot reach these
     # schemas. The ONE deliberate exception (004_events_outbox.sql) is a SELECT on
