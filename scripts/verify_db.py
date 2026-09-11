@@ -5,7 +5,7 @@ Read-only verification of the live homelitics database.
 Two groups of checks:
 
   STRUCTURE  always runs. Asserts the live schema matches what schema-2.sql
-             (= migrations 001..005) declares. This is the guard that runs
+             (= migrations 001..006) declares. This is the guard that runs
              *before* anything destructive: schema-2.sql opens with
              `drop schema ... cascade`, so if the live DB has drifted, we stop.
 
@@ -139,6 +139,18 @@ def verify_structure(cur):
           "unguarded — a backdated transition will corrupt current_stage" if "max(t.changed_at)" not in src else "")
     check("sync_lead_stage has a pinned search_path", "search_path" in src.lower())
 
+    # 006: the bot channel is TELEGRAM. Both CHECKs must carry it and WHATSAPP
+    # must be gone, or the API's Literal and the DB disagree on what a lead is.
+    for table, con in (("lead", "lead_source_channel_check"),
+                       ("interaction", "interaction_channel_check")):
+        d = one(cur, """select pg_get_constraintdef(c.oid) from pg_constraint c
+                        where c.conname = %s and c.conrelid = %s::regclass""",
+                (con, f"core.{table}")) or ""
+        check(f"core.{table} channel CHECK is TELEGRAM|IN_APP|CALL (006)",
+              "TELEGRAM" in d and "WHATSAPP" not in d,
+              "missing — apply migrations/006_telegram_channel.sql" if not d
+              else ("" if "TELEGRAM" in d and "WHATSAPP" not in d else d))
+
     # The reason running without RLS is safe: PostgREST simply cannot reach these
     # schemas. The ONE deliberate exception (004_events_outbox.sql) is a SELECT on
     # events.domain_event for `authenticated`, so Realtime can stream it — and that
@@ -217,6 +229,11 @@ def verify_data(cur):
                                            where d.lead_id = l.id)""")
     check("every LOST lead has a lost_detail row", orphan == 0,
           f"{orphan} LOST leads with no reason" if orphan else "")
+
+    stale = one(cur, """select (select count(*) from core.lead where source_channel = 'WHATSAPP')
+                              + (select count(*) from core.interaction where channel = 'WHATSAPP')""")
+    check("no WHATSAPP rows remain (006 relabelled them TELEGRAM)", stale == 0,
+          f"{stale} rows still say WHATSAPP" if stale else "")
 
     # ---- injected ground truth ----
     print("\nGROUND TRUTH  (seed 42)")

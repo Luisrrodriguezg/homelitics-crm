@@ -130,8 +130,8 @@ Read-only. Run it first, every time. `schema-2.sql` starts with
 
 ### 2. Migrations
 
-Already applied to `homelitics` (001 → 005). On a fresh project either run
-`migrations/001..005` in order in the Supabase SQL Editor (click "Run without
+Already applied to `homelitics` (001 → 006). On a fresh project either run
+`migrations/001..006` in order in the Supabase SQL Editor (click "Run without
 RLS" on the warning) or `python scripts/apply_migrations.py` against the session
 pooler. `schema-2.sql` is the same thing as one idempotent file. `005` enables
 **pg_cron** and schedules the two background jobs — see "Background jobs" below.
@@ -360,7 +360,7 @@ docker compose --profile local up --build
 ```
 
 Brings up a throwaway `postgres:17-alpine`, applies `migrations/*.sql` on first
-boot (001 → 004 in filename order — `004`'s Realtime block no-ops without an
+boot (001 → 006 in filename order — `004`'s Realtime block no-ops without an
 `auth` schema), runs a one-shot seed (`--scale small --seed 42`), then starts the
 API on `:8000` with `DEV_AUTH_BYPASS=true`. Send `X-Dev-Agent-Id: <core.agent
 uuid>` instead of a bearer token. The API refuses to start if the bypass is on

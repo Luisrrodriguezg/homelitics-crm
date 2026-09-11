@@ -450,7 +450,7 @@ def _simulate_funnel(rng, now, sim_start, listings, listing_meta, client_ids, sl
     duplicate_pairs: set[tuple[str, str]] = set()
     used_slots: set[tuple[str, str]] = set()
     stats = dict(total_views=0, total_contacts=0)
-    channels, channel_w = ["WHATSAPP", "IN_APP", "CALL"], [55, 30, 15]
+    channels, channel_w = ["TELEGRAM", "IN_APP", "CALL"], [55, 30, 15]
 
     for lid, _pid, agent_id, _op, _price, _min_accept, _status, published in listings:
         meta = listing_meta[lid]

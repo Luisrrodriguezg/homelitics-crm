@@ -14,7 +14,7 @@ async def test_same_pair_returns_existing_thread(world, client_for):
     body = {
         "client_id": str(world.clients[0].id),
         "listing_id": str(world.listings[0].id),
-        "source_channel": "WHATSAPP",
+        "source_channel": "TELEGRAM",
         "message": "Interested",
     }
 
@@ -63,3 +63,15 @@ async def test_opening_transition_and_stage_cache(world, client_for):
     hist = (await c.get(f"/leads/{lead_id}/transitions")).json()
     assert [t["to_stage"] for t in hist] == ["INTERESTED"]
     assert hist[0]["from_stage"] is None
+
+
+async def test_whatsapp_is_no_longer_a_channel(world, client_for):
+    """006: the bot is on Telegram. WHATSAPP must fail validation (422) before
+    it reaches the CHECK constraint."""
+    c = client_for(world.agents[0][0])
+    r = await c.post("/leads", json={
+        "client_id": str(world.clients[0].id),
+        "listing_id": str(world.listings[0].id),
+        "source_channel": "WHATSAPP",
+    })
+    assert r.status_code == 422, r.text

@@ -236,7 +236,7 @@ HU-01 CA3. A `(client_id, listing_id)` pair is one conversation.
 curl -s -w '\nHTTP %{http_code}\n' -H "$AUTH" -H 'Content-Type: application/json' -d '{
   "client_id":  "00059b9d-a87d-41ff-b1fa-7e6afa236dbb",
   "listing_id": "626d719d-81cf-4252-9815-9d6c9d713084",
-  "source_channel": "WHATSAPP",
+  "source_channel": "TELEGRAM",
   "message": "¿Sigue disponible?"
 }' $BASE/leads
 ```
@@ -247,7 +247,7 @@ curl -s -w '\nHTTP %{http_code}\n' -H "$AUTH" -H 'Content-Type: application/json
 - **200** — the thread already existed; the existing lead is returned (same `id`).
 - **404** — the listing is not in your agency, or the client does not exist.
 
-`source_channel`: `WHATSAPP` \| `IN_APP` \| `CALL`. `message` ≤ 4000 chars, optional.
+`source_channel`: `TELEGRAM` \| `IN_APP` \| `CALL`. `message` ≤ 4000 chars, optional.
 
 ```json
 {
@@ -255,7 +255,7 @@ curl -s -w '\nHTTP %{http_code}\n' -H "$AUTH" -H 'Content-Type: application/json
   "client_id": "00059b9d-a87d-41ff-b1fa-7e6afa236dbb",
   "listing_id": "626d719d-81cf-4252-9815-9d6c9d713084",
   "agent_id": "de8a774b-cf36-458b-8737-819096da1dac",
-  "source_channel": "WHATSAPP",
+  "source_channel": "TELEGRAM",
   "current_stage": "INTERESTED",
   "created_at": "2026-09-01T18:48:27.689803Z",
   "updated_at": "2026-09-01T18:48:27.689803Z"
@@ -351,7 +351,7 @@ interaction is what the response-time metric measures.
 ```bash
 curl -s -H "$AUTH" -H 'Content-Type: application/json' -d '{
   "direction": "OUTBOUND",
-  "channel": "WHATSAPP",
+  "channel": "TELEGRAM",
   "type": "MESSAGE",
   "body": "Hola, sí está disponible. ¿Le sirve el sábado a las 10?"
 }' $BASE/leads/$LEAD/interactions
@@ -360,7 +360,7 @@ curl -s -H "$AUTH" -H 'Content-Type: application/json' -d '{
 | field | values |
 |---|---|
 | `direction` | `INBOUND` \| `OUTBOUND` |
-| `channel` | `WHATSAPP` \| `IN_APP` \| `CALL` |
+| `channel` | `TELEGRAM` \| `IN_APP` \| `CALL` |
 | `type` | `MESSAGE` \| `CALL` \| `NOTE` \| `STATUS_CHANGE` (default `MESSAGE`) |
 | `body` | ≤ 4000 chars, optional |
 | `occurred_at` | optional; backdate an interaction |
@@ -676,7 +676,7 @@ Body shape: `{"detail": "..."}` (string) for app errors, or
 | set | values |
 |---|---|
 | Stage | `INTERESTED`, `VISIT_SCHEDULED`, `VISITED`, `NEGOTIATING`, `WON`, `LOST` |
-| Channel | `WHATSAPP`, `IN_APP`, `CALL` |
+| Channel | `TELEGRAM`, `IN_APP`, `CALL` |
 | Interaction direction | `INBOUND`, `OUTBOUND` |
 | Interaction type | `MESSAGE`, `CALL`, `NOTE`, `STATUS_CHANGE` |
 | Appointment status | `PENDING_CONFIRMATION`, `CONFIRMED`, `RESCHEDULED`, `CANCELLED`, `COMPLETED`, `NO_SHOW` |
@@ -715,19 +715,19 @@ CLIENT=$(docker compose exec -T db psql -U postgres -tA -c \
 # 2. inbound contact -> lead (201)
 LEAD=$(curl -s -H "$AUTH" -H 'Content-Type: application/json' -d "{
   \"client_id\":\"$CLIENT\",\"listing_id\":\"$LISTING\",
-  \"source_channel\":\"WHATSAPP\",\"message\":\"¿Sigue disponible?\"}" \
+  \"source_channel\":\"TELEGRAM\",\"message\":\"¿Sigue disponible?\"}" \
   $BASE/leads | jq -r '.id')
 echo "lead = $LEAD"
 
 # 3. same contact again -> dedup (200, same id)
 curl -s -o /dev/null -w "re-contact: HTTP %{http_code}\n" -H "$AUTH" \
   -H 'Content-Type: application/json' \
-  -d "{\"client_id\":\"$CLIENT\",\"listing_id\":\"$LISTING\",\"source_channel\":\"WHATSAPP\"}" \
+  -d "{\"client_id\":\"$CLIENT\",\"listing_id\":\"$LISTING\",\"source_channel\":\"TELEGRAM\"}" \
   $BASE/leads
 
 # 4. agent replies (starts the response-time clock)
 curl -s -o /dev/null -H "$AUTH" -H 'Content-Type: application/json' \
-  -d '{"direction":"OUTBOUND","channel":"WHATSAPP","type":"MESSAGE","body":"Sí, ¿el sábado a las 10?"}' \
+  -d '{"direction":"OUTBOUND","channel":"TELEGRAM","type":"MESSAGE","body":"Sí, ¿el sábado a las 10?"}' \
   $BASE/leads/$LEAD/interactions
 
 # 5. publish availability, read the free slots

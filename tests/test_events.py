@@ -27,7 +27,7 @@ async def test_creating_a_lead_writes_one_lead_created_event(world, client_for, 
     r = await c.post("/leads", json={
         "client_id": str(world.clients[0].id),
         "listing_id": str(world.listings[0].id),
-        "source_channel": "WHATSAPP",
+        "source_channel": "TELEGRAM",
     })
     assert r.status_code == 201, r.text
 
@@ -53,7 +53,7 @@ async def test_relay_publishes_once_and_runs_the_handler(world, client_for, sess
     lead_id = (await c.post("/leads", json={
         "client_id": str(world.clients[0].id),
         "listing_id": str(world.listings[0].id),
-        "source_channel": "WHATSAPP",
+        "source_channel": "TELEGRAM",
     })).json()["id"]
 
     first = await events.relay_events(session)

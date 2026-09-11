@@ -314,3 +314,23 @@ connection instead of paged through the admin list.
 The service-role key bypasses RLS and creates users. It belongs in `.env` on the
 machine that runs the script and nowhere else — never in a frontend, never in
 Render's env vars (the API does not need it).
+
+---
+
+## 16. The bot channel is TELEGRAM, not WHATSAPP (006_telegram_channel.sql)
+
+Inbound leads arrive through a Telegram bot. The channel value set was authored
+as `WHATSAPP | IN_APP | CALL`, so the API answered `TELEGRAM` with a 422 and the
+seeded history labelled every bot lead as WhatsApp. `006` relabels those rows in
+place (`lead.source_channel`, `interaction.channel`) and swaps the two CHECK
+constraints to `TELEGRAM | IN_APP | CALL`.
+
+**Renamed, not added.** Keeping WHATSAPP in the set would let the API accept a
+channel nothing produces, and every dashboard would carry an empty bucket. A
+value set is `text` + `CHECK` precisely so this is one ALTER (§10). The Pydantic
+`Channel` Literal, the seeder weights (55/30/15 unchanged) and the docs move with
+it; `verify_db.py` asserts the live constraints carry TELEGRAM and that no
+WHATSAPP row survives.
+
+**Revisit if** a second messaging channel really goes live: add it to both CHECKs
+and the Literal in one migration, never as a free-text column.
