@@ -239,7 +239,7 @@ final as (
 )
 insert into public.seed_plan
 select lead_id, client_id, listing_id, agent_id, created_at,
-       (array['WHATSAPP','IN_APP','CALL'])[case when r5 < 0.55 then 1 when r5 < 0.85 then 2 else 3 end],
+       (array['TELEGRAM','IN_APP','CALL'])[case when r5 < 0.55 then 1 when r5 < 0.85 then 2 else 3 end],
        is_slow, is_over, abandoned,
        -- slow agents answer around 30h, everyone else around 2h
        case when abandoned then null

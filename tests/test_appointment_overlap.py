@@ -10,7 +10,7 @@ async def _lead(c, world, client_idx=0):
     r = await c.post("/leads", json={
         "client_id": str(world.clients[client_idx].id),
         "listing_id": str(world.listings[0].id),
-        "source_channel": "WHATSAPP",
+        "source_channel": "TELEGRAM",
     })
     assert r.status_code in (200, 201), r.text
     return r.json()["id"]

@@ -14,7 +14,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 Stage = Literal["INTERESTED", "VISIT_SCHEDULED", "VISITED", "NEGOTIATING", "WON", "LOST"]
-Channel = Literal["WHATSAPP", "IN_APP", "CALL"]
+Channel = Literal["TELEGRAM", "IN_APP", "CALL"]
 Direction = Literal["INBOUND", "OUTBOUND"]
 InteractionType = Literal["MESSAGE", "CALL", "NOTE", "STATUS_CHANGE"]
 AppointmentStatus = Literal[

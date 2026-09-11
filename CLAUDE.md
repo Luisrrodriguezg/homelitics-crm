@@ -41,8 +41,8 @@ Target metrics (from the backlog):
   so re-running wipes and recreates. Paste into Supabase SQL Editor and Run.
   Click "Run without RLS" on the warning popup. Run `scripts/verify_db.py` first —
   if the live schema has drifted, this file will silently destroy it.
-- `migrations/` — `001_schema.sql` (the baseline) then `002`–`005` (additive,
-  idempotent; all applied to `homelitics`). `schema-2.sql` is kept equal to 001 + … + 005.
+- `migrations/` — `001_schema.sql` (the baseline) then `002`–`006` (additive,
+  idempotent; all applied to `homelitics`). `schema-2.sql` is kept equal to 001 + … + 006.
 - `render.yaml` — free Render deploy. `scripts/provision_agent_users.py` — one
   Auth login per real agent (Admin API), replaces hand-made users.
 - `seed.py` — deterministic synthetic data generator.
@@ -184,7 +184,7 @@ the AC → implementation → verification matrix.
 ### Local one-command dev
 
 `docker compose --profile local up --build` — throwaway `postgres:17-alpine`,
-`migrations/*.sql` auto-applied on first boot (001→004), one-shot `seed`
+`migrations/*.sql` auto-applied on first boot (001→006), one-shot `seed`
 (`--scale small --seed 42`), API with `DEV_AUTH_BYPASS=true` (identity from
 `X-Dev-Agent-Id`; the app refuses to start with the bypass on against a
 non-local DB). No `.env`, no Supabase.
@@ -202,7 +202,7 @@ default Mon–Fri availability for the 48 agents) — the exact SQL is in the
 session's `phase0_cleanup.sql`; `scripts/purge_test_rows.sql` is the reusable part.
 `tests/conftest.py` now refuses a non-local `DATABASE_URL` so debris cannot recur.
 
-Migrations `001`–`005` are applied to the live DB; `scripts/verify_db.py` is green.
+Migrations `001`–`006` are applied to the live DB; `scripts/verify_db.py` is green.
 `.env` is filled and working in this worktree.
 
 ### Outstanding

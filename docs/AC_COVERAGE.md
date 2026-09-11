@@ -29,7 +29,7 @@ Verification commands, from the repo root with `.env` present:
 
 | AC | Requirement | Satisfied by | Verified by |
 |---|---|---|---|
-| AC1 | Migrations as versioned artifacts | `migrations/001..005`, each idempotent; `scripts/apply_migrations.py`; `schema-2.sql` = 001+…+005. **Deviation:** no Alembic — `docs/DECISIONS.md` §2 | `scripts/verify_db.py` structure checks |
+| AC1 | Migrations as versioned artifacts | `migrations/001..006`, each idempotent; `scripts/apply_migrations.py`; `schema-2.sql` = 001+…+006. **Deviation:** no Alembic — `docs/DECISIONS.md` §2 | `scripts/verify_db.py` structure checks |
 | AC2 | HU-01: create-or-return lead, race-free dedup | `services/lead.create_or_get_lead` — `INSERT … ON CONFLICT DO NOTHING RETURNING`, 201 new / 200 existing; DB `UNIQUE (client_id, listing_id)` | `tests/test_dedup.py` (incl. 6 concurrent posts) |
 | AC3 | HU-02/05/06/07/14: visit request → confirm → feedback; agent availability & slots; funnel transitions; timeline | `routers/appointments.py`, `routers/availability.py` (`/availability`, `/time-off`, `/slots`), `routers/leads.py` transitions + interactions; `services/availability.compute_slots` (`America/Bogota`, reuses `_BLOCKING`) | `tests/test_transitions.py`, `tests/test_appointment_overlap.py`, `tests/test_availability.py` |
 | AC4 | Domain events / outbox + a consumer | `events.domain_event` (`004`); `services/events.emit` in the caller's txn; `events.relay_domain_events()` (`005`) run by pg_cron every 2 min — `lead.created` → first-touch follow-up (HU-10); on `supabase_realtime` publication | `tests/test_events.py`; `verify_db.py` (`domain_event` present, RLS on, one grant, both job functions, both `cron.job` rows); `pg_publication_tables` |

@@ -45,7 +45,7 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      # *.sql here run once, in filename order, on an empty data dir: 001→004.
+      # *.sql here run once, in filename order, on an empty data dir: 001→006.
       # 004's Realtime block is guarded behind an `auth` schema check → no-ops here.
       - ./migrations:/docker-entrypoint-initdb.d:ro
     healthcheck:
