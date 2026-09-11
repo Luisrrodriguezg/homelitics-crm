@@ -376,7 +376,7 @@ docker compose --profile local up --build
 ```
 
 Brings up a throwaway `postgres:17-alpine`, applies `migrations/*.sql` on first
-boot (001 → 007 in filename order — `004`'s Realtime block no-ops without an
+boot (001 → 008 in filename order — `004`'s Realtime block no-ops without an
 `auth` schema), runs a one-shot seed (`--scale small --seed 42`), then starts the
 API on `:8000` with `DEV_AUTH_BYPASS=true`. Send `X-Dev-Agent-Id: <core.agent
 uuid>` instead of a bearer token. The API refuses to start if the bypass is on

@@ -125,7 +125,7 @@ async def world(session):
     account = ServiceAccount(
         name=f"{tag} bot", auth_user_id=uuid.uuid4(),
         scopes=["leads:create", "leads:transition", "interactions:write",
-                "tasks:write", "visits:request"],
+                "tasks:write", "visits:request", "clients:create"],
     )
     session.add_all(agencies + clients_p + owners_p + [p for pair in agents_p for p in pair]
                     + [bot_p, account])
@@ -228,7 +228,10 @@ async def world(session):
     await _run(delete(Listing).where(Listing.id.in_(listing_ids)))
     await _run(delete(AgentAvailability).where(AgentAvailability.agent_id.in_(agent_ids)))
     await _run(delete(AgentTimeOff).where(AgentTimeOff.agent_id.in_(agent_ids)))
-    await _run(delete(C).where(C.id.in_(client_ids)))
+    # By tagged person, not just the two fixture ids: POST /clients in a test
+    # makes more, and a leftover client row would block the pii.person sweep.
+    tagged = select(Person.id).where(Person.full_name.like(f"{tag}%"))
+    await _run(delete(C).where(C.id.in_(client_ids) | C.person_id.in_(tagged)))
     await _run(delete(G).where(G.agency_id.in_(agency_ids)))
     await _run(delete(SA).where(SA.id == account_id))   # after its AI_AGENT rows
     await _run(delete(P).where(P.id.in_(property_ids)))

@@ -60,6 +60,25 @@ class AgentOut(ORMModel):
     email: str | None = None
 
 
+# ------------------------------------------------------------------- client
+
+class ClientCreate(BaseModel):
+    full_name: str = Field(min_length=1, max_length=200)
+    phone: str | None = Field(default=None, max_length=40)
+    email: str | None = Field(default=None, max_length=320)
+    # The Telegram `from.id`. When present, a repeat post returns the existing
+    # client (200); when absent, every post creates a new one. Nothing else is
+    # matched on — see docs/DECISIONS.md §18.
+    telegram_user_id: int | None = Field(default=None, gt=0)
+
+
+class ClientOut(ORMModel):
+    # Deliberately no name/phone/email: clients are global, not agency-owned, so
+    # echoing stored PII would hand any agency another agency's contact details.
+    id: uuid.UUID
+    created_at: datetime
+
+
 # --------------------------------------------------------------------- lead
 
 class LeadCreate(BaseModel):

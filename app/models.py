@@ -50,6 +50,8 @@ class Person(Base):
     anonymized_at: Mapped[datetime | None] = _ts()
     created_at: Mapped[datetime] = _ts(server_default=func.now())
     updated_at: Mapped[datetime] = _ts(server_default=func.now())
+    # 008. UNIQUE: the one key POST /clients matches a returning client on.
+    telegram_user_id: Mapped[int | None] = mapped_column(BigInteger)
 
 
 # -------------------------------------------------------------- core: org

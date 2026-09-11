@@ -182,7 +182,11 @@ fails.
    ```bash
    H=(-H "Authorization: Bearer $TOKEN" -H "X-Agency-Id: $AGENCY_ID" -H 'Content-Type: application/json')
 
-   # a client wrote in about a listing -> lead (201; 200 if the thread already exists)
+   # someone wrote in -> their client id (201 first time; 200 + same id every time after)
+   curl -s "${H[@]}" $API_BASE/clients \
+     -d '{"telegram_user_id":<message.from.id>,"full_name":"Ana Gómez","phone":"3001234567"}'
+
+   # ...about a listing -> lead (201; 200 if the thread already exists)
    curl -s "${H[@]}" $API_BASE/leads \
      -d '{"client_id":"<uuid>","listing_id":"<uuid>","source_channel":"TELEGRAM","message":"¿Sigue disponible?"}'
 
@@ -196,7 +200,10 @@ fails.
    Listings are agency-scoped like everything else: a listing from another
    agency is a 404. Call `GET /listings` once per agency id, keep a
    listing → agency map, and send the matching header. The lead is owned by
-   the listing's human agent, not the bot.
+   the listing's human agent, not the bot. Clients are the exception: they
+   belong to no agency, so `POST /clients` returns the same client whichever
+   agency header it is sent with. Always send `telegram_user_id`; it is what
+   makes the second message from the same person land on the same client.
 
 9. **When a call fails:**
 
@@ -218,7 +225,8 @@ bot the new credentials, then delete the old user.
 **Scopes.** Every write route names a scope; the account's `scopes` array must
 contain it or the call is **403**. Reads need no scope. Humans are never scope
 checked. Default grant: `leads:create`, `leads:transition`, `interactions:write`,
-`tasks:write`, `visits:request`. Not granted by default: `leads:close` (moving
+`tasks:write`, `visits:request`, `clients:create` (added by `008`, which also
+granted it to existing accounts). Not granted by default: `leads:close` (moving
 a lead to `WON`/`LOST` — on top of `leads:transition`), `visits:manage`
 (`PATCH /appointments/{id}`), `visits:feedback`, `availability:write`,
 `listings:views`. Reassign stays `TEAM_ADMIN`-only, so a bot can never do it.
@@ -388,6 +396,32 @@ curl -s -H "$AUTH" -H 'Content-Type: application/json' \
 ---
 
 ### 6.2 Leads — the funnel
+
+#### `POST /clients` — register, or return by Telegram account
+A lead needs a `client_id`; this is where one comes from (migration `008`).
+
+```bash
+curl -s -w '\nHTTP %{http_code}\n' -H "$AUTH" -H 'Content-Type: application/json' -d '{
+  "full_name": "Ana Gómez",
+  "phone": "3001234567",
+  "email": null,
+  "telegram_user_id": 5712345678
+}' $BASE/clients
+# -> {"id": "…", "created_at": "…"}
+```
+
+- **With `telegram_user_id`**: one Telegram account is one client. **201** the
+  first time, **200** with the same `id` after that. The stored name and phone
+  are *not* updated by a repeat. Enforced by a UNIQUE index, so two simultaneous
+  first messages cannot create two clients.
+- **Without it**: always **201**, always a new client. Name, email and phone are
+  never used to match. In the live data they collide between different people
+  (and phones get reformatted), so a match would merge strangers.
+  `docs/DECISIONS.md` §18.
+
+`full_name` is required (1–200 chars). `phone` ≤ 40, `email` ≤ 320, both optional.
+The response is only `id` + `created_at`: clients are shared across agencies, so
+contact details are never echoed back. Service accounts need `clients:create`.
 
 #### `POST /leads` — create or return
 HU-01 CA3. A `(client_id, listing_id)` pair is one conversation.

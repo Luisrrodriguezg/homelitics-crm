@@ -5,7 +5,7 @@ Read-only verification of the live homelitics database.
 Two groups of checks:
 
   STRUCTURE  always runs. Asserts the live schema matches what schema-2.sql
-             (= migrations 001..007) declares. This is the guard that runs
+             (= migrations 001..008) declares. This is the guard that runs
              *before* anything destructive: schema-2.sql opens with
              `drop schema ... cascade`, so if the live DB has drifted, we stop.
 
@@ -55,6 +55,8 @@ EXPECTED_INDEXES = {
     "idx_domain_event_unpublished",
     # from 007_ai_agents.sql
     "idx_agent_service_account_agency",
+    # from 008_telegram_clients.sql
+    "uq_person_telegram_user_id",
 }
 
 
@@ -173,6 +175,18 @@ def verify_structure(cur):
                         where n.nspname='core' and p.proname='sweep_inactive_leads'""") or ""
     check("sweep_inactive_leads uses the same response definition (007)",
           "AI_AGENT" in sweep and "MESSAGE" in sweep)
+
+    # 008: POST /clients dedups on this column; without it the API cannot load
+    # a person at all (the model selects it).
+    has_tg = one(cur, """select count(*) from information_schema.columns
+                         where table_schema='pii' and table_name='person'
+                           and column_name='telegram_user_id'""") == 1
+    check("pii.person.telegram_user_id exists (008)", has_tg,
+          "" if has_tg else "apply migrations/008_telegram_clients.sql")
+    scopes_default = one(cur, """select column_default from information_schema.columns
+                                 where table_schema='core' and table_name='service_account'
+                                   and column_name='scopes'""") or ""
+    check("new service accounts get clients:create (008)", "clients:create" in scopes_default)
 
     # The reason running without RLS is safe: PostgREST simply cannot reach these
     # schemas. The ONE deliberate exception (004_events_outbox.sql) is a SELECT on
