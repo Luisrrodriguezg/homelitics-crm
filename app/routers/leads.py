@@ -1,12 +1,12 @@
 """Lead board, funnel transitions, timeline, tasks, reassignment."""
 import uuid
 
-from fastapi import APIRouter, Query, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 
 from app.config import get_settings
-from app.deps import CurrentAgent, DbSession, TeamAdmin
+from app.deps import CurrentAgent, DbSession, TeamAdmin, has_scope, require_scope
 from app.schemas import (
-    InteractionCreate, InteractionOut, LeadCreate, LeadOut, Message,
+    TERMINAL_STAGES, InteractionCreate, InteractionOut, LeadCreate, LeadOut, Message,
     ReassignRequest, Stage, TaskCreate, TaskOut, TaskPatch, TransitionCreate,
     TransitionOut,
 )
@@ -33,6 +33,7 @@ router = APIRouter(prefix="/leads", tags=["leads"])
         201: {"description": "New lead created"},
         404: {"description": "Listing not in your agency, or client does not exist"},
     },
+    dependencies=[Depends(require_scope("leads:create"))],
 )
 async def create_lead(
     payload: LeadCreate, agent: CurrentAgent, session: DbSession, response: Response
@@ -44,6 +45,7 @@ async def create_lead(
         source_channel=payload.source_channel,
         message=payload.message,
         agency_id=agent.agency_id,
+        actor=agent,
     )
     if not created:
         response.status_code = status.HTTP_200_OK
@@ -130,13 +132,23 @@ async def list_transitions(lead_id: uuid.UUID, agent: CurrentAgent, session: DbS
         "same transaction, an invariant the schema itself cannot express."
     ),
     responses={
+        403: {"model": Message, "description": "Service account lacks `leads:close` for WON/LOST"},
         409: {"model": Message, "description": "Illegal or terminal transition"},
         422: {"model": Message, "description": "LOST without a lost_reason, or unknown reason"},
     },
+    dependencies=[Depends(require_scope("leads:transition"))],
 )
 async def add_transition(
     lead_id: uuid.UUID, payload: TransitionCreate, agent: CurrentAgent, session: DbSession
 ):
+    # Closing a lead is its own scope: WON and LOST are terminal and feed the
+    # North Star metrics, so a bot has to be granted that explicitly.
+    if payload.to_stage in TERMINAL_STAGES and not has_scope(agent, "leads:close"):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "Service account lacks the 'leads:close' scope required to move a lead to "
+            f"{payload.to_stage}",
+        )
     return await svc.add_transition(
         session, lead_id=lead_id, to_stage=payload.to_stage,
         lost_reason=payload.lost_reason, note=payload.note, agent=agent,
@@ -179,8 +191,11 @@ async def list_interactions(lead_id: uuid.UUID, agent: CurrentAgent, session: Db
     response_model=InteractionOut,
     status_code=status.HTTP_201_CREATED,
     summary="Record a message, call or note",
-    description="The first OUTBOUND interaction on a lead is what the response-time "
-                "metric measures, so log agent replies here.",
+    description="The first OUTBOUND `MESSAGE` or `CALL` on a lead is what the "
+                "response-time metric measures, so log agent replies here. `NOTE` and "
+                "`STATUS_CHANGE` are internal; interactions written by a service "
+                "account are recorded but never count as an agent response.",
+    dependencies=[Depends(require_scope("interactions:write"))],
 )
 async def add_interaction(
     lead_id: uuid.UUID, payload: InteractionCreate, agent: CurrentAgent, session: DbSession
@@ -200,6 +215,7 @@ async def list_tasks(lead_id: uuid.UUID, agent: CurrentAgent, session: DbSession
     response_model=TaskOut,
     status_code=status.HTTP_201_CREATED,
     summary="Raise a follow-up task",
+    dependencies=[Depends(require_scope("tasks:write"))],
 )
 async def create_task(
     lead_id: uuid.UUID, payload: TaskCreate, agent: CurrentAgent, session: DbSession
@@ -214,6 +230,7 @@ async def create_task(
     response_model=TaskOut,
     summary="Complete, snooze or edit a task",
     responses={404: {"model": Message, "description": "Task not found on this lead"}},
+    dependencies=[Depends(require_scope("tasks:write"))],
 )
 async def patch_task(
     lead_id: uuid.UUID, task_id: uuid.UUID, payload: TaskPatch,

@@ -18,7 +18,7 @@ from sqlalchemy import (
     BigInteger, Boolean, Date, DateTime, ForeignKey, Integer, Numeric,
     SmallInteger, Text, Time, UniqueConstraint, func,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -63,6 +63,23 @@ class Agency(Base):
     created_at: Mapped[datetime] = _ts(server_default=func.now())
 
 
+class ServiceAccount(Base):
+    """The credential behind an AI agent (007). One Supabase login; one
+    AI_AGENT row per agency hangs off it. Scopes gate writes, the hourly
+    budget brakes runaway loops, `active` is the kill switch."""
+    __tablename__ = "service_account"
+    __table_args__ = {"schema": "core"}
+
+    id: Mapped[uuid.UUID] = _pk()
+    name: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    auth_user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, unique=True)
+    scopes: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
+    hourly_write_limit: Mapped[int] = mapped_column(Integer, nullable=False, server_default="300")
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
+    created_at: Mapped[datetime] = _ts(server_default=func.now())
+    updated_at: Mapped[datetime] = _ts(server_default=func.now())
+
+
 class Agent(Base):
     __tablename__ = "agent"
     __table_args__ = {"schema": "core"}
@@ -75,9 +92,19 @@ class Agent(Base):
     # The JWT `sub` claim. Nullable: seeded agents are unbound until
     # scripts/bind_agents.py runs. Unique index allows many NULLs.
     auth_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), unique=True)
+    # Set iff role == 'AI_AGENT' (CHECK in 007): the bot's credential lives on
+    # the service account, never on the row itself.
+    service_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("core.service_account.id")
+    )
     created_at: Mapped[datetime] = _ts(server_default=func.now())
 
     person: Mapped[Person] = relationship(lazy="joined")
+    service_account: Mapped[ServiceAccount | None] = relationship(lazy="joined")
+
+    @property
+    def is_bot(self) -> bool:
+        return self.role == "AI_AGENT"
 
 
 class Owner(Base):

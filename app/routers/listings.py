@@ -1,9 +1,9 @@
 """Listing catalogue and the view event stream."""
 import uuid
 
-from fastapi import APIRouter, Query, status
+from fastapi import APIRouter, Depends, Query, status
 
-from app.deps import CurrentAgent, DbSession
+from app.deps import CurrentAgent, DbSession, require_scope
 from app.schemas import ListingOut, ListingStatus, Message, OperationType, ViewCreate
 from app.services import listing as svc
 
@@ -72,6 +72,7 @@ async def get_listing(listing_id: uuid.UUID, agent: CurrentAgent, session: DbSes
     description="Append-only event feeding `analytics.listing_performance.views`. "
                 "`client_id` is optional — anonymous traffic still counts.",
     responses={404: {"model": Message, "description": "Listing or client not found"}},
+    dependencies=[Depends(require_scope("listings:views"))],
 )
 async def record_view(
     listing_id: uuid.UUID, payload: ViewCreate, agent: CurrentAgent, session: DbSession

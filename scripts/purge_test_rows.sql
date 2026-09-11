@@ -78,6 +78,7 @@ begin
   delete from core.client   where id = any(v_client);
   delete from core.owner    where person_id = any(v_person);
   delete from core.agent    where id = any(v_agent);
+  delete from core.service_account where name like 'pytest-%';
   delete from core.agency   where id = any(v_agency);
   delete from pii.person    where id = any(v_person);
 

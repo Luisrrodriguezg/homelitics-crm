@@ -48,6 +48,11 @@ curl -s $BASE/analytics/north-star -H "Authorization: Bearer $TOKEN" | jq
 itself is bad (missing, expired, or from a different Supabase project); **403**
 means the token is fine but no `core.agent` is bound to that user.
 
+**Connecting an AI agent / bot?** It does not use an agent login — it gets a
+service account that works across all six agencies, with scopes, a write
+budget and a kill switch. Follow [API guide §2d, "Set it up, step by
+step"](docs/API_GUIDE.md#set-it-up-step-by-step).
+
 **This is the fastest way for a peer to consume the API** — no local setup, no
 `.env`, no database access needed. For the full picture — every endpoint with
 request/response examples, the domain-event model, an end-to-end funnel
@@ -208,6 +213,16 @@ this script, never in a frontend or in Render's env vars (the API does not use
 it). `scripts/bind_agents.py` still exists for binding two users you created by
 hand.
 
+**An AI agent** does not get one of these logins. It is a *service account*
+(migration `007`, applied to `homelitics`): one Auth user you create in the
+dashboard, then `scripts/provision_ai_agent.sql` pasted into the SQL Editor with
+that user's UUID. It works across every agency by sending `X-Agency-Id`, is
+limited by scopes and an hourly write budget, and its replies never count as
+agent responses in the metrics. **Numbered setup — deploy, login, provisioning,
+token, first calls, troubleshooting:** [`docs/API_GUIDE.md` §2d "Set it up,
+step by step"](docs/API_GUIDE.md#set-it-up-step-by-step). Reasoning in
+`docs/DECISIONS.md` §17.
+
 ### 5. Run
 
 ```bash
@@ -237,6 +252,7 @@ curl -s localhost:8000/me -H "Authorization: Bearer $TOKEN"
 
 * **401** — the token is missing, expired, or not from this project
 * **403** — the token is fine, but no agent is bound (run `bind_agents.py`)
+* **400** — a service-account token without `X-Agency-Id` (API guide §2d)
 
 ---
 
@@ -360,7 +376,7 @@ docker compose --profile local up --build
 ```
 
 Brings up a throwaway `postgres:17-alpine`, applies `migrations/*.sql` on first
-boot (001 → 006 in filename order — `004`'s Realtime block no-ops without an
+boot (001 → 007 in filename order — `004`'s Realtime block no-ops without an
 `auth` schema), runs a one-shot seed (`--scale small --seed 42`), then starts the
 API on `:8000` with `DEV_AUTH_BYPASS=true`. Send `X-Dev-Agent-Id: <core.agent
 uuid>` instead of a bearer token. The API refuses to start if the bypass is on

@@ -334,3 +334,59 @@ WHATSAPP row survives.
 
 **Revisit if** a second messaging channel really goes live: add it to both CHECKs
 and the Literal in one migration, never as a free-text column.
+
+---
+
+## 17. An AI agent is a service account, not a fake human (007_ai_agents.sql)
+
+**Decision.** An AI agent authenticates as a `core.service_account` — one
+Supabase login — and acts, per request, as one of that account's per-agency
+`core.agent` rows (`role = 'AI_AGENT'`), chosen by an `X-Agency-Id` header. It
+talks to the API over HTTP like everyone else; it gets no Postgres role, no
+service-role key.
+
+**Why not just a `core.agent` row.** Four reasons, each fatal on its own:
+
+* *One agency.* `agency_id` is NOT NULL and `auth_user_id` is UNIQUE, so one
+  login reaches one agency. The bot needs all six.
+* *No limits.* The only permission check was `get_team_admin`, on reassign. A
+  normal login can do every other write.
+* *The login script would grab it.* `provision_agent_users.py` selects every
+  active agent; it would mint a login for the bot and overwrite its email.
+* *It would corrupt the #1 metric.* `first_outbound` in `agent_response_time`
+  and `lead_outcome` was `min(occurred_at)` over every OUTBOUND interaction,
+  whoever wrote it. A bot moving stages with a note, or replying to clients,
+  stops every lead's response clock in seconds — the slow-agent pattern the
+  seeder injects, and `ground_truth.md` asserts, would vanish.
+
+**Why the header is not a tenancy hole.** `get_current_agent` still returns an
+`Agent` row loaded from the database; the header only picks *which of the
+account's own rows*. `agency_id` never comes from the client. No service
+function changed, so `tests/test_tenancy.py` means exactly what it did.
+
+**The bot never owns a lead.** `POST /leads` already assigns the listing's
+agent, and `reassign` now refuses `AI_AGENT` targets. A bot with no leads and no
+listings is invisible to every analytics view.
+
+**One definition of "an agent response".** An OUTBOUND `MESSAGE` or `CALL`
+written by a human — in both views, the sweep, and `/leads/at-risk`
+(`schemas.RESPONSE_TYPES`). This is what makes the bot safe to let loose on
+stages and replies, and it fixes a bug that was already live: the 005 sweep
+writes an OUTBOUND `NOTE` credited to the lead's owner, which the old views
+took as the agent answering at hour 72 — so `never_answered` undercounted and
+the median got a fake 72h point for every lead nobody touched. `NOTE` and
+`STATUS_CHANGE` are internal bookkeeping; the seeder's only OUTBOUND rows are
+`MESSAGE`, so the ground truth is unchanged.
+
+**Guardrails, deliberately few.** Scopes per write route (deny-by-default for
+bots, no-op for humans; `tests/test_route_scopes.py` fails if a write route has
+none). `leads:close` on top of `leads:transition` for WON/LOST, off by default —
+closing a lead moves North Star metrics. A rolling-hour write budget → 429,
+counted on `changed_by`/`created_by`, which is why bot writes are always
+attributed. `service_account.active` as the kill switch. Not built: dry-run
+mode, scopes per agency, static API keys, an activity dashboard — each is
+additive.
+
+**Revisit if** a second kind of non-human principal appears (a webhook
+integration, say) — then `scopes` probably moves off `service_account` into a
+role table — or if the budget needs to be exact rather than a brake.

@@ -15,12 +15,13 @@ from sqlalchemy import Select, exists, func, or_, select
 # postgresql.insert, not sqlalchemy.insert: on_conflict_do_nothing is dialect-specific.
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.models import (
     Agent, AssignmentAudit, Client, FollowUpTask, Interaction, Lead,
     LeadLostDetail, LeadStage, LeadStageTransition, Listing, LostReason,
 )
-from app.schemas import ALLOWED_TRANSITIONS, TERMINAL_STAGES
+from app.schemas import ALLOWED_TRANSITIONS, RESPONSE_TYPES, TERMINAL_STAGES
 from app.services import events
 
 
@@ -49,6 +50,7 @@ async def create_or_get_lead(
     source_channel: str,
     message: str | None,
     agency_id: uuid.UUID,
+    actor: Agent | None = None,
 ) -> tuple[Lead, bool]:
     """HU-01 CA3. Returns (lead, created).
 
@@ -56,6 +58,10 @@ async def create_or_get_lead(
     ON CONFLICT DO NOTHING. Checking in Python first would race: two concurrent
     requests both see nothing and both insert, and one gets an IntegrityError.
     Here the loser of the race simply reads the winner's row.
+
+    `actor` is recorded as `changed_by` on the opening transition, so a lead a
+    service account created is attributable to it. Ownership is unaffected: the
+    listing's agent owns the lead whoever created it.
     """
     listing = (
         await session.execute(
@@ -97,7 +103,10 @@ async def create_or_get_lead(
 
     # Opening transition. The trigger sets lead.current_stage from this.
     session.add(
-        LeadStageTransition(lead_id=new_id, from_stage=None, to_stage="INTERESTED")
+        LeadStageTransition(
+            lead_id=new_id, from_stage=None, to_stage="INTERESTED",
+            changed_by=actor.id if actor else None,
+        )
     )
     if message:
         session.add(
@@ -107,6 +116,9 @@ async def create_or_get_lead(
                 channel=source_channel,
                 type="MESSAGE",
                 body=message,
+                # A bot relaying the client's message is still the bot writing
+                # the row; a human's inbound stays unattributed, as before.
+                created_by=actor.id if actor and actor.is_bot else None,
             )
         )
     # Outbox row in the same transaction: the event exists iff the lead does.
@@ -251,6 +263,10 @@ async def reassign(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Target agent not found in this agency")
     if not target.active:
         raise HTTPException(status.HTTP_409_CONFLICT, "Target agent is deactivated")
+    if target.is_bot:
+        # A bot never owns a lead: it would surface in the per-agent leaderboard
+        # and nobody would be responsible for the client.
+        raise HTTPException(status.HTTP_409_CONFLICT, "Cannot assign a lead to an AI agent")
     if target.id == lead.agent_id:
         raise HTTPException(status.HTTP_409_CONFLICT, "Lead is already assigned to that agent")
 
@@ -297,7 +313,10 @@ async def add_interaction(
         channel=data.channel,
         type=data.type,
         body=data.body,
-        created_by=agent.id if data.direction == "OUTBOUND" else None,
+        # OUTBOUND is attributed so the response-time metric knows who replied;
+        # a bot is attributed on everything so its activity is auditable and
+        # the views can exclude it.
+        created_by=agent.id if data.direction == "OUTBOUND" or agent.is_bot else None,
         **({"occurred_at": data.occurred_at} if data.occurred_at else {}),
     )
     session.add(row)
@@ -319,9 +338,20 @@ async def leads_at_risk(
     cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
     terminal = select(LeadStage.code).where(LeadStage.is_terminal.is_(True))
 
+    # Same definition of "response" as the views and the sweep (007): an
+    # OUTBOUND MESSAGE or CALL written by a human. Notes, stage-change notes
+    # and anything an AI agent wrote do not count as contact.
+    author = aliased(Agent)
     last_outbound = (
         select(func.max(Interaction.occurred_at))
-        .where(Interaction.lead_id == Lead.id, Interaction.direction == "OUTBOUND")
+        .select_from(Interaction)
+        .outerjoin(author, author.id == Interaction.created_by)
+        .where(
+            Interaction.lead_id == Lead.id,
+            Interaction.direction == "OUTBOUND",
+            Interaction.type.in_(RESPONSE_TYPES),
+            or_(author.role.is_(None), author.role != "AI_AGENT"),
+        )
         .correlate(Lead)
         .scalar_subquery()
     )

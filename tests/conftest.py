@@ -99,12 +99,13 @@ async def session():
 
 @pytest_asyncio.fixture
 async def world(session):
-    """Two agencies, two agents each, one listing per agency, two clients.
+    """Two agencies, two agents each, one listing per agency, two clients — plus
+    one service account with an AI_AGENT row in each agency (007).
 
     Yields a namespace and deletes everything it created afterwards, in FK order.
     """
     from app.models import (
-        Agency, Agent, Client, Listing, Owner, Person, Property,
+        Agency, Agent, Client, Listing, Owner, Person, Property, ServiceAccount,
     )
 
     tag = f"pytest-{uuid.uuid4().hex[:8]}"
@@ -120,7 +121,14 @@ async def world(session):
     clients_p = [person(f"client {i}") for i in range(2)]
     owners_p = [person(f"owner {i}") for i in range(2)]
     agents_p = [[person(f"agent {a}.{g}") for g in range(2)] for a in range(2)]
-    session.add_all(agencies + clients_p + owners_p + [p for pair in agents_p for p in pair])
+    bot_p = person("bot")
+    account = ServiceAccount(
+        name=f"{tag} bot", auth_user_id=uuid.uuid4(),
+        scopes=["leads:create", "leads:transition", "interactions:write",
+                "tasks:write", "visits:request"],
+    )
+    session.add_all(agencies + clients_p + owners_p + [p for pair in agents_p for p in pair]
+                    + [bot_p, account])
     await session.flush()
 
     agents = [
@@ -134,9 +142,15 @@ async def world(session):
         ]
         for a in range(2)
     ]
+    # One AI_AGENT row per agency, all hanging off the single service account.
+    bots = [
+        Agent(person_id=bot_p.id, agency_id=agencies[a].id, role="AI_AGENT",
+              service_account_id=account.id)
+        for a in range(2)
+    ]
     owners = [Owner(person_id=owners_p[i].id) for i in range(2)]
     clients = [Client(person_id=clients_p[i].id) for i in range(2)]
-    session.add_all([a for pair in agents for a in pair] + owners + clients)
+    session.add_all([a for pair in agents for a in pair] + bots + owners + clients)
     await session.flush()
 
     props = [
@@ -168,8 +182,10 @@ async def world(session):
     listing_ids = [l.id for l in listings]
     property_ids = [p.id for p in props]
     owner_ids = [o.id for o in owners]
+    account_id = account.id
 
-    made.update(agencies=agencies, agents=agents, listings=listings, clients=clients)
+    made.update(agencies=agencies, agents=agents, listings=listings, clients=clients,
+                bots=bots, service_account=account, service_account_id=account_id)
     yield type("World", (), made)
 
     # ---- teardown ----
@@ -187,7 +203,7 @@ async def world(session):
     )
     from app.models import (
         AgentAvailability, AgentTimeOff, Property as P, Owner as O, Agency as A,
-        Agent as G, Client as C,
+        Agent as G, Client as C, ServiceAccount as SA,
     )
 
     async def _run(stmt):
@@ -214,6 +230,7 @@ async def world(session):
     await _run(delete(AgentTimeOff).where(AgentTimeOff.agent_id.in_(agent_ids)))
     await _run(delete(C).where(C.id.in_(client_ids)))
     await _run(delete(G).where(G.agency_id.in_(agency_ids)))
+    await _run(delete(SA).where(SA.id == account_id))   # after its AI_AGENT rows
     await _run(delete(P).where(P.id.in_(property_ids)))
     await _run(delete(O).where(O.id.in_(owner_ids)))
     await _run(delete(A).where(A.id.in_(agency_ids)))
