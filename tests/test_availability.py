@@ -17,9 +17,15 @@ WINDOW = (MON, MON + timedelta(days=5))                  # Mon–Fri
 
 
 async def _rule(session, agent, weekday, start=time(9), end=time(12)):
+    # valid_from defaults to today; pin it to the test week so the rule still
+    # covers MON once that date is in the past (compute_slots skips days
+    # before valid_from).
     return await svc.add_availability(
         session, agent_id=agent.id, agency_id=agent.agency_id,
-        data=AvailabilityCreate(weekday=weekday, start_time=start, end_time=end),
+        data=AvailabilityCreate(
+            weekday=weekday, start_time=start, end_time=end,
+            valid_from=MON.date(),
+        ),
     )
 
 
