@@ -190,12 +190,28 @@ fails.
    curl -s "${H[@]}" $API_BASE/leads \
      -d '{"client_id":"<uuid>","listing_id":"<uuid>","source_channel":"TELEGRAM","message":"¿Sigue disponible?"}'
 
-   # the bot answers, then books the visit
+   # the bot answers
    curl -s "${H[@]}" $API_BASE/leads/$LEAD/interactions \
      -d '{"direction":"OUTBOUND","channel":"TELEGRAM","body":"¡Hola! Sí, sigue disponible."}'
-   curl -s "${H[@]}" $API_BASE/leads/$LEAD/transitions \
-     -d '{"to_stage":"VISIT_SCHEDULED","note":"Visita agendada por el asistente"}'
+
+   # ...the client wants to visit: offer free times from the lead's agent
+   # (lead.agent_id), at least 2 h out, long enough for a 60-min visit
+   curl -s "${H[@]}" "$API_BASE/agents/$LEAD_AGENT/slots?from=2026-09-14T13:00:00Z&to=2026-09-21T00:00:00Z&duration_min=60"
+
+   # ...the client picks one -> PENDING_CONFIRMATION (201); the same post again -> 200
+   curl -s "${H[@]}" $API_BASE/leads/$LEAD/appointments \
+     -d '{"scheduled_at":"2026-09-15T15:00:00Z","duration_min":60}'
+
+   # ...and gets it for their calendar: the .ics as a Telegram document, plus
+   # the google_calendar_url from the visit's detail (Android can't open .ics)
+   curl -s "${H[@]}" $API_BASE/appointments/$APPT/invite.ics -o visita.ics
+   curl -s "${H[@]}" $API_BASE/appointments/$APPT | jq -r .google_calendar_url
    ```
+
+   Do **not** post a `VISIT_SCHEDULED` transition yourself: the lead moves
+   there when its owner confirms the visit. The whole scheduling conversation —
+   returning clients, moving and cancelling, feedback after the visit — is
+   **§6.10 "How the bot schedules"**.
 
    Listings are agency-scoped like everything else: a listing from another
    agency is a 404. Call `GET /listings` once per agency id, keep a
@@ -225,12 +241,15 @@ bot the new credentials, then delete the old user.
 **Scopes.** Every write route names a scope; the account's `scopes` array must
 contain it or the call is **403**. Reads need no scope. Humans are never scope
 checked. Default grant: `leads:create`, `leads:transition`, `interactions:write`,
-`tasks:write`, `visits:request`, `clients:create` (added by `008`, which also
-granted it to existing accounts). Not granted by default: `leads:close` (moving
-a lead to `WON`/`LOST` — on top of `leads:transition`), `visits:manage`
-(`PATCH /appointments/{id}`), `visits:feedback`, `availability:write`,
-`listings:views`. Reassign stays `TEAM_ADMIN`-only, so a bot can never do it.
-Grant a scope with one UPDATE, no deploy:
+`tasks:write`, `visits:request` (book, move and cancel visits), `clients:create`
+(added by `008`), `visits:feedback` (the client's post-visit feedback, added by
+`009`; both migrations also granted them to existing accounts). Not granted by
+default: `leads:close` (moving a lead to `WON`/`LOST` — on top of
+`leads:transition`), `visits:manage` (confirming a visit — granting it makes the
+bot's bookings land `CONFIRMED`, i.e. instant booking), `availability:write`,
+`calendar:feed`, `listings:views`. Recording `COMPLETED`/`NO_SHOW` is for people
+only, whatever the scopes. Reassign stays `TEAM_ADMIN`-only, so a bot can never
+do it. Grant a scope with one UPDATE, no deploy:
 
 ```sql
 update core.service_account
@@ -315,8 +334,9 @@ curl -s -H "$AUTH" $BASE/analytics/north-star | jq
 | The conversation | `core.lead` | `UNIQUE (client_id, listing_id)` — this *is* dedup |
 | Stage history | `core.lead_stage_transition` | append-only, the source of truth |
 | Timeline | `core.interaction` | `INBOUND` / `OUTBOUND`; first `OUTBOUND` drives response-time |
-| Visit | `core.appointment` | request → confirm → complete; feedback after |
-| Availability | `core.agent_availability` / `agent_time_off` | weekly rules + ad-hoc time off |
+| Visit | `core.appointment` | **the calendar** — one row per visit; the owner confirms; confirming / completing moves the lead's stage; feedback after |
+| Availability | `core.agent_availability` / `agent_time_off` | weekly rules + time off (manual, or busy time imported from the agent's own calendar) |
+| The agent's own calendar | `core.agent_external_calendar` | a Google/Outlook/iCloud iCal address, read for busy time only (§6.10) |
 | Events | `events.domain_event` | transactional outbox (see §8) |
 | Dashboards | `analytics.*` views | read these, never `core` |
 
@@ -465,6 +485,7 @@ All leads in your agency, newest activity first.
 | `stage` | filter by `current_stage` (`INTERESTED` … `LOST`) |
 | `agent_id` | filter by owning agent |
 | `listing_id` | filter by listing |
+| `client_id` | filter by client — how the bot finds a returning client's threads |
 | `limit` / `offset` | pagination |
 
 #### `GET /leads/{lead_id}`
@@ -605,31 +626,69 @@ transaction (doing only one was the seeder's original bug).
 
 ### 6.7 Appointments (visits)
 
-Availability tables were originally cut, so this is **request → the agent
-confirms**, not book-a-free-slot.
+`core.appointment` **is** the calendar (DECISIONS §19). Three rules decide
+everything below:
 
-#### `POST /leads/{lead_id}/appointments` — request a visit
+- **Status is the owning agent's consent.** A visit booked by the lead's owner
+  is born `CONFIRMED`. One booked by anybody else — an AI agent on the client's
+  behalf, a colleague — lands `PENDING_CONFIRMATION` until the owner confirms
+  (HU-02). An AI agent granted `visits:manage` books `CONFIRMED` (instant booking).
+- **One open visit per lead.** Posting the same slot again returns the visit
+  already made (**200**) — safe to retry. Any other time is a **409**: move the
+  open visit with `PATCH` instead.
+- **The calendar drives the funnel.** `CONFIRMED` moves an `INTERESTED` lead to
+  `VISIT_SCHEDULED`; `COMPLETED` moves a `VISIT_SCHEDULED` lead to `VISITED`;
+  moving a lead to `WON`/`LOST` cancels its open visits. Written as ordinary
+  transitions (`changed_by` = whoever acted), so don't post those yourself.
+
+Every change also writes one `STATUS_CHANGE` line on the lead's timeline,
+attributed to whoever made it, and one `appointment.*` event (§8).
+
+#### `POST /leads/{lead_id}/appointments` — book a visit
 ```bash
 curl -s -H "$AUTH" -H 'Content-Type: application/json' \
-  -d '{"scheduled_at":"2026-09-07T16:00:00Z","duration_min":60}' \
+  -d '{"scheduled_at":"2026-09-15T15:00:00Z","duration_min":60}' \
   $BASE/leads/$LEAD/appointments
 ```
-Lands as `PENDING_CONFIRMATION`. `duration_min` 15–480, default 60.
+`duration_min` 15–480, default 60. The response carries `created_by` — who booked it.
 
-- **201** — created
-- **409** — overlaps a visit the agent already has. Back-to-back is fine
+- **201** — booked (`CONFIRMED` or `PENDING_CONFIRMATION`, per the consent rule)
+- **200** — the lead already had exactly this visit; it is returned unchanged
+- **409** — overlaps a visit the agent already has; or the lead already has an
+  open visit at another time; or the lead is `WON`/`LOST`. Back-to-back is fine
   (half-open intervals: a visit ending 11:00 doesn't block one starting 11:00).
   Double-booking prevention is a per-agent advisory lock + `SELECT … FOR UPDATE`,
-  so it's safe under concurrency — fire four identical requests and exactly one wins.
+  so it's safe under concurrency — four clients asking for one slot, one wins.
 - **422** — `scheduled_at` is in the past
-- **409** *(only when `ENFORCE_AVAILABILITY=true`)* — the slot is outside the
-  agent's published availability
+- **AI agents only:** **409** if the slot is not in `GET /agents/{id}/slots`
+  (published hours minus time off minus visits), **422** if it starts sooner
+  than `VISIT_MIN_NOTICE_MINUTES` (120). For people that check runs only when
+  `ENFORCE_AVAILABILITY=true` (default false).
 
 #### `GET /leads/{lead_id}/appointments`
 Visits for the lead, earliest first.
 
 #### `GET /appointments/{appointment_id}`
-One appointment. **404** outside your agency.
+One visit plus where it is. **404** outside your agency.
+```json
+{
+  "id": "03c2fe87-…", "lead_id": "dd78c6cd-…", "agent_id": "663f1c97-…",
+  "scheduled_at": "2026-09-15T16:00:00Z", "duration_min": 60, "status": "CONFIRMED",
+  "created_by": "663f1c97-…", "created_at": "…", "updated_at": "…",
+  "listing_id": "acf5e81e-…",
+  "location": "Carrera 25A # 86-49, Santa María de los Ángeles, Medellín",
+  "agent_name": "Marcela Vargas Londoño",
+  "google_calendar_url": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=Visita+inmobiliaria+…"
+}
+```
+
+#### `GET /appointments/{appointment_id}/invite.ics` — the client's copy
+The visit as a one-event `.ics` (`text/calendar`), for the bot to send the client
+as a document. Opens in Apple Calendar, Outlook and desktop calendars; on
+Android use `google_calendar_url` instead. Contains the address, the agent's name
+and the status — nothing about the client. Same UID
+(`<appointment id>@homelitics`) every time, so re-sending it after a change
+updates the event in Apple/Outlook rather than adding a second one.
 
 #### `PATCH /appointments/{appointment_id}` — lifecycle
 ```bash
@@ -644,16 +703,25 @@ Set `status` and/or move it in time with `scheduled_at` / `duration_min`
 
 | status | meaning |
 |---|---|
-| `PENDING_CONFIRMATION` | initial |
-| `CONFIRMED` | agent accepted |
-| `RESCHEDULED` | moved (auto-set if you move a `CONFIRMED` visit without naming a status) |
+| `PENDING_CONFIRMATION` | set by someone other than the owner; the owner hasn't agreed yet |
+| `CONFIRMED` | the owning agent agreed to this time |
+| `RESCHEDULED` | moved, awaiting re-confirmation (auto-set when a `CONFIRMED` visit is moved without naming a status — the owner confirms their own move by sending `"status":"CONFIRMED"` with it) |
 | `CANCELLED` / `COMPLETED` / `NO_SHOW` | **terminal** |
 
-- **409** — already terminal, or the new slot overlaps
-- **422** — new `scheduled_at` in the past
+- **403** — an AI agent confirming without `visits:manage`, or recording
+  `COMPLETED`/`NO_SHOW` (people only). AI agents may move and cancel.
+- **409** — already terminal, or the new slot overlaps (or, for an AI agent, is
+  outside the published slots)
+- **422** — new `scheduled_at` in the past (or, for an AI agent, too soon)
+
+#### `GET /appointments/{appointment_id}/feedback`
+Feedback on the visit — at most one row per side (`AGENT`, `CLIENT`). The bot
+reads it to know whether the client has already been asked.
 
 #### `POST /appointments/{appointment_id}/feedback`
-Only valid once the visit is `COMPLETED`.
+Only valid once the visit is `COMPLETED`. One per side: posting again from the
+same side returns the first row with **200**. An AI agent may only submit
+`"submitted_by": "CLIENT"` (**403** otherwise; scope `visits:feedback`).
 
 ```bash
 curl -s -H "$AUTH" -H 'Content-Type: application/json' -d '{
@@ -718,25 +786,34 @@ curl -s -H "$AUTH" -H 'Content-Type: application/json' -d '{
 ```
 Half-open `[starts_at, ends_at)`; `starts_at < ends_at`. `DELETE` returns **204**.
 
-#### `GET /agents/{agent_id}/slots?from=&to=` — free 30-minute grid
+- **409** on `POST` — the time off overlaps a visit that is still on the
+  calendar; the message lists them. A booked visit is a commitment: move or
+  cancel it first (and tell the client).
+- **409** on `DELETE` — the block has `"source": "ICS"`: it was imported from the
+  agent's own calendar (§6.10), so remove it there.
+
+#### `GET /agents/{agent_id}/slots?from=&to=&duration_min=` — free times for a visit
 ```bash
 curl -s -H "$AUTH" \
-  "$BASE/agents/$AGENT/slots?from=2026-09-07T00:00:00Z&to=2026-09-08T00:00:00Z"
+  "$BASE/agents/$AGENT/slots?from=2026-09-07T00:00:00Z&to=2026-09-08T00:00:00Z&duration_min=60"
 ```
 ```json
 {
   "agent_id": "451b4cf3-6123-4df7-b656-af7229d4beef",
   "slot_minutes": 30,
+  "duration_min": 60,
   "slots": [
-    "2026-09-07T14:00:00Z", "2026-09-07T14:30:00Z",
-    "2026-09-07T15:30:00Z", "2026-09-07T16:00:00Z", "2026-09-07T16:30:00Z"
+    "2026-09-07T14:00:00Z", "2026-09-07T15:30:00Z", "2026-09-07T16:00:00Z"
   ]
 }
 ```
-The weekly rules are expanded over `[from, to)` in `APP_TIMEZONE`, then
-**time off** and **calendar-blocking appointments** (`PENDING_CONFIRMATION`,
-`CONFIRMED`, `RESCHEDULED`) are subtracted. `from` and `to` are `?from=`/`?to=`
-query params (ISO-8601); `from < to`, else **422**.
+The weekly rules are expanded over `[from, to)` in `APP_TIMEZONE` on a 30-minute
+grid, then **time off** (manual and imported) and **calendar-blocking
+appointments** (`PENDING_CONFIRMATION`, `CONFIRMED`, `RESCHEDULED`) are
+subtracted. A start is listed only if a whole visit of `duration_min` (15–480,
+default 30) fits there, and only if it is in the future. This is exactly what
+an AI agent may book. `from` and `to` are ISO-8601 — write UTC as `Z`, since a
+`+` in a query string reads as a space. `from < to`, else **422**.
 
 ---
 
@@ -787,6 +864,133 @@ overpriced cohort shows high views with a low win rate.
 
 ---
 
+### 6.10 Calendar (migration `009`)
+
+The visits of §6.7 *are* the calendar; these routes only show them, or feed an
+agent's own busy time in. Everything leaves in UTC (`Z`); render it in
+`America/Bogota`, which every calendar response names in `timezone`.
+
+#### `GET /agents/{agent_id}/calendar?from=&to=` — one agent, for the frontend
+```bash
+curl -s -H "$AUTH" "$BASE/agents/$AGENT/calendar?from=2026-09-14T00:00:00Z&to=2026-09-21T00:00:00Z"
+```
+```json
+{
+  "timezone": "America/Bogota",
+  "events": [
+    {"id": "availability-663f…-20260914T1400", "kind": "AVAILABILITY",
+     "agent_id": "663f…", "start": "2026-09-14T14:00:00Z", "end": "2026-09-14T17:00:00Z",
+     "title": "Disponible"},
+    {"id": "03c2fe87-…", "kind": "VISIT", "agent_id": "663f…", "agent_name": "Marcela Vargas Londoño",
+     "start": "2026-09-15T16:00:00Z", "end": "2026-09-15T17:00:00Z",
+     "title": "Visita · Susana · Santa María de los Ángeles (por confirmar)",
+     "status": "PENDING_CONFIRMATION", "lead_id": "dd78…", "listing_id": "acf5…",
+     "location": "Carrera 25A # 86-49, Santa María de los Ángeles, Medellín",
+     "booked_by_bot": true, "conflict": false},
+    {"id": "9e1a…", "kind": "TIME_OFF", "agent_id": "663f…", "agent_name": "Marcela Vargas Londoño",
+     "start": "2026-09-16T14:00:00Z", "end": "2026-09-16T15:00:00Z",
+     "title": "Ocupado (calendario externo)", "source": "ICS"}
+  ]
+}
+```
+- `VISIT` — every status, so the frontend can grey out cancelled ones. The
+  owner's *to confirm* queue is `PENDING_CONFIRMATION` + `RESCHEDULED`.
+  `conflict: true` means busy time imported from the agent's own calendar
+  overlaps the visit — the agent decides.
+- `TIME_OFF` — manual (`source: MANUAL`, titled with its reason) or imported
+  (`source: ICS`, never with the event's own title).
+- `AVAILABILITY` — published hours, meant as a background.
+
+At most 62 days per request (**422** beyond); **404** for an agent outside your
+agency. Shaped for [FullCalendar](https://fullcalendar.io): fetch with your
+Bearer header, map `AVAILABILITY` to `display: 'background'`. For live updates,
+subscribe to `events.domain_event` over Supabase Realtime (§8 — already granted
+per agency) and refetch on `appointment.*`.
+
+#### `GET /calendar?from=&to=` — the whole agency
+Every agent's visits and time off, each with `agent_name` — the team view. No
+availability background.
+
+#### `GET /me/calendar-feed` — your visits in Google / Apple / Outlook
+```json
+{"ics_url": "https://homelitics-api.onrender.com/agents/663f…/calendar.ics?token=5d0c…",
+ "webcal_url": "webcal://homelitics-api.onrender.com/agents/663f…/calendar.ics?token=5d0c…"}
+```
+Google Calendar → *Other calendars → + → From URL* → paste `ics_url`. On a
+Mac/iPhone, open `webcal_url`. The feed carries your visits from 30 days back to
+180 ahead (cancelled ones drop out), each titled with the client's first name,
+the neighbourhood and whether it is still to be confirmed.
+
+- **The URL is the credential** — calendar apps send no Authorization header —
+  so treat it like a password. `POST /me/calendar-feed/rotate` issues a new one;
+  the old URL is a **404** from then on.
+- **It is a mirror, not the live view.** Google refreshes subscribed calendars
+  on its own schedule — hours — and cannot be forced; Apple lets you pick (5–15
+  min). On the free Render host a fetch that hits a cold start may fail and be
+  retried next cycle.
+- AI agents have no feed (**404**).
+
+The feed itself is `GET /agents/{agent_id}/calendar.ics?token=…` — no auth header,
+`text/calendar`; a wrong token is **404**.
+
+#### `PUT /me/external-calendar` — your own calendar as busy time
+```bash
+curl -s -X PUT -H "$AUTH" -H 'Content-Type: application/json' \
+  -d '{"ics_url":"https://calendar.google.com/calendar/ical/you%40gmail.com/private-…/basic.ics"}' \
+  $BASE/me/external-calendar
+```
+Where to find the address: Google Calendar → *Settings* → your calendar →
+*Integrate calendar* → **Secret address in iCal format**. Outlook and iCloud
+publish one too.
+
+Every busy event in the next 60 days becomes time off (`source: ICS`), so
+`/slots` stops offering those times and **the bot cannot book over them**. Only
+the times are imported, never titles, attendees or descriptions. Events marked
+*free*, cancelled ones and copies of our own visits are skipped. It syncs
+immediately, then again whenever a calendar read finds it older than 15 minutes.
+
+- The response masks the address (`ics_url_masked`); it is a credential for
+  your whole calendar.
+- **422** — not `https://`/`webcal://`, or not on Google/Outlook/iCloud (the
+  API fetches it, so the hosts are an allow-list).
+- A feed that fails never breaks a request: the error is recorded in
+  `last_status`/`last_error`, and the busy time from the last good sync stays.
+
+`GET /me/external-calendar` shows the status. `POST /me/external-calendar/sync`
+syncs now → `{"status": "OK", "imported": 5, "removed": 0, "skipped": 3,
+"error": null}`. `DELETE /me/external-calendar` disconnects it and removes
+everything it imported.
+
+#### How the bot schedules (reactive, per client message)
+The bot never gets pushed anything. On each message it reads the current state
+and acts in the conversation:
+
+1. `POST /clients` with `telegram_user_id` → the client (201 new, 200 returning).
+2. `GET /leads?client_id=…` with each agency header → their existing threads;
+   otherwise `POST /leads`.
+3. The client wants to visit → `GET /agents/{lead.agent_id}/slots?from=<now+2h>&to=<+7d>&duration_min=60`.
+   Offer 3–5 times, in `America/Bogota`.
+4. The client picks one → `POST /leads/{id}/appointments`. **201**
+   `PENDING_CONFIRMATION`: tell them the agent will confirm and that they can
+   ask any time. **200**: a retry, same visit. **409**: taken meanwhile — offer again.
+5. Send `GET /appointments/{id}/invite.ics` as a document, plus
+   `google_calendar_url` from `GET /appointments/{id}`.
+6. Any later message → `GET /leads/{id}/appointments` and say what is true
+   *now*, whatever the agent did since. The client wants another time →
+   `PATCH` with `scheduled_at` (→ `RESCHEDULED`, the agent re-confirms); wants
+   out → `PATCH {"status":"CANCELLED"}`.
+7. A `COMPLETED` visit with no `CLIENT` row in `GET /appointments/{id}/feedback`
+   → ask for a 1–5 score and the main objection → `POST .../feedback` with
+   `"submitted_by": "CLIENT"`.
+
+What the bot never does: confirm (unless granted `visits:manage`), mark
+`COMPLETED`/`NO_SHOW`, post `VISIT_SCHEDULED`/`VISITED` transitions (the
+calendar does that), or close a lead (unless granted `leads:close`). Agents'
+changes are not pushed to clients: an agent who moves or cancels a confirmed
+visit should tell the client.
+
+---
+
 ## 7. Automatic background work
 
 Two jobs, implemented as SQL functions (`migrations/005_cron_jobs.sql`) and run
@@ -827,8 +1031,14 @@ locked` so two runners can never publish the same event twice.
 |---|---|---|---|---|
 | `lead.created` | a new lead thread is created (not on the 200 dedup path) | lead id | `listing_id`, `client_id`, `agent_id` | raises the **first-touch follow-up task** |
 | `lead.stage_changed` | any transition | lead id | `from`, `to` | — |
-| `appointment.booked` | a visit is requested | appointment id | `lead_id`, `agent_id`, `scheduled_at` | — |
+| `appointment.booked` | a visit is booked (not on the 200 retry path) | appointment id | `lead_id`, `agent_id`, `scheduled_at`, `duration_min`, `status`, `actor_id`, `by_bot` | — |
+| `appointment.confirmed` / `.cancelled` / `.completed` / `.no_show` / `.reopened` | a visit's status changes (`.cancelled` also when its lead is closed — `reason: lead_won`/`lead_lost`) | appointment id | the same, plus `previous_status`, `previous_scheduled_at` | — |
+| `appointment.rescheduled` | a visit moves in time | appointment id | the same | — |
 | `lead.went_cold` | the inactivity sweep flags a lead | lead id | `inactivity_hours` | — |
+
+The `appointment.*` events are recorded for audit and for the dashboard's
+Realtime feed. Nothing delivers them to clients: the bot reads the current state
+when a client writes (§6.10).
 
 On a Supabase deploy the table is on the `supabase_realtime` publication with
 RLS + an agency policy, so a dashboard can subscribe to its own agency's events.
@@ -850,15 +1060,15 @@ docker compose exec db psql -U postgres -c \
 
 | Code | Meaning | Typical cause |
 |---|---|---|
-| **200** | OK / dedup hit | `POST /leads` for an existing `(client, listing)` |
+| **200** | OK / dedup hit | `POST /leads` for an existing `(client, listing)`; `POST /clients` for a known Telegram id; the same visit or feedback posted again |
 | **201** | Created | new lead, transition, appointment, task, interaction, feedback, availability |
 | **204** | No content | `DELETE` of an availability rule / time-off entry |
 | **400** | Bad request | service-account token without `X-Agency-Id`, or a non-UUID header |
 | **401** | Not authenticated | missing/expired token; `DEV_AUTH_BYPASS` on but no `X-Dev-Agent-Id` |
-| **403** | Authenticated, not allowed | token not bound to an agent; non-`TEAM_ADMIN` calling reassign; deactivated agent or service account; service account lacks the route's scope |
-| **404** | Not found *or not yours* | lead/listing/appointment/agent in another agency; unknown id; using another agency's listing on `POST /leads` |
-| **409** | Conflict | illegal/terminal transition; overlapping visit; terminal appointment; feedback on a non-`COMPLETED` visit; reassign to a deactivated / current / AI agent |
-| **422** | Unprocessable | past `scheduled_at`; `LOST` without `lost_reason`; unknown enum code; `from >= to` on slots; Pydantic body validation |
+| **403** | Authenticated, not allowed | token not bound to an agent; non-`TEAM_ADMIN` calling reassign; deactivated agent or service account; service account lacks the route's scope; an AI agent confirming a visit without `visits:manage`, recording `COMPLETED`/`NO_SHOW`, or submitting feedback as `AGENT` |
+| **404** | Not found *or not yours* | lead/listing/appointment/agent in another agency; unknown id; using another agency's listing on `POST /leads`; a wrong calendar-feed token |
+| **409** | Conflict | illegal/terminal transition; overlapping visit; another open visit on the lead; a visit on a `WON`/`LOST` lead; an AI agent outside the published slots; terminal appointment; feedback on a non-`COMPLETED` visit; time off over a booked visit; deleting imported time off; reassign to a deactivated / current / AI agent |
+| **422** | Unprocessable | past `scheduled_at`; an AI agent booking too soon; `LOST` without `lost_reason`; unknown enum code; `from >= to` on slots; a calendar window over 62 days; a calendar address that is not https on an accepted host; Pydantic body validation |
 | **429** | Budget spent | a service account past its `hourly_write_limit`; retry after the hour |
 | **503** | DB unreachable | `/health` when Postgres is down |
 
@@ -882,8 +1092,10 @@ Body shape: `{"detail": "..."}` (string) for app errors, or
 | Lost reason | `PRICE`, `LOCATION`, `BOUGHT_ELSEWHERE`, `NO_RESPONSE`, `FINANCING`, `OTHER` |
 | Objection | `PRICE`, `SIZE`, `LOCATION`, `CONDITION`, `HOA_FEE`, `OTHER` |
 | `submitted_by` | `AGENT`, `CLIENT` |
-| Agent role | `AGENT`, `TEAM_ADMIN` |
+| Agent role | `AGENT`, `TEAM_ADMIN`, `AI_AGENT` |
 | weekday | `0` Mon … `6` Sun |
+| Time-off source | `MANUAL`, `ICS` (imported from the agent's own calendar) |
+| Calendar event kind | `VISIT`, `TIME_OFF`, `AVAILABILITY` |
 
 ---
 
@@ -926,35 +1138,38 @@ curl -s -o /dev/null -H "$AUTH" -H 'Content-Type: application/json' \
   -d '{"direction":"OUTBOUND","channel":"TELEGRAM","type":"MESSAGE","body":"Sí, ¿el sábado a las 10?"}' \
   $BASE/leads/$LEAD/interactions
 
-# 5. publish availability, read the free slots
-for d in 0 1 2 3 4 5; do
+# 5. publish availability, read the free slots for a 60-min visit in 3 days
+DAY=$(python3 -c "from datetime import*;print(date.today()+timedelta(days=3))")
+for d in 0 1 2 3 4 5 6; do
   curl -s -o /dev/null -H "$AUTH" -H 'Content-Type: application/json' \
     -d "{\"weekday\":$d,\"start_time\":\"09:00\",\"end_time\":\"13:00\"}" \
     $BASE/agents/$AGENT/availability
 done
-curl -s -H "$AUTH" "$BASE/agents/$AGENT/slots?from=2026-09-07T00:00:00Z&to=2026-09-08T00:00:00Z" \
+curl -s -H "$AUTH" "$BASE/agents/$AGENT/slots?from=${DAY}T00:00:00Z&to=${DAY}T23:59:00Z&duration_min=60" \
   | jq '.slots'
 
-# 6. move to VISIT_SCHEDULED and request the visit
-curl -s -o /dev/null -w "-> VISIT_SCHEDULED: HTTP %{http_code}\n" -H "$AUTH" \
-  -H 'Content-Type: application/json' -d '{"to_stage":"VISIT_SCHEDULED"}' \
-  $BASE/leads/$LEAD/transitions
+# 6. book it. The admin is not the listing's agent, so it lands PENDING_CONFIRMATION;
+#    the lead stays INTERESTED until the visit is confirmed
 APPT=$(curl -s -H "$AUTH" -H 'Content-Type: application/json' \
-  -d '{"scheduled_at":"2026-09-07T16:00:00Z","duration_min":60}' \
+  -d "{\"scheduled_at\":\"${DAY}T16:00:00Z\",\"duration_min\":60}" \
   $BASE/leads/$LEAD/appointments | jq -r '.id')
+curl -s -H "$AUTH" "$BASE/agents/$AGENT/calendar?from=${DAY}T00:00:00Z&to=${DAY}T23:59:00Z" \
+  | jq '.events[] | {kind, title, status}'
 
-# 7. confirm -> complete -> feedback   (-X PATCH: curl POSTs otherwise)
+# 7. confirm -> complete -> feedback   (-X PATCH: curl POSTs otherwise).
+#    CONFIRMED moves the lead to VISIT_SCHEDULED, COMPLETED to VISITED
 curl -s -o /dev/null -X PATCH -H "$AUTH" -H 'Content-Type: application/json' \
   -d '{"status":"CONFIRMED"}' $BASE/appointments/$APPT
 curl -s -o /dev/null -X PATCH -H "$AUTH" -H 'Content-Type: application/json' \
   -d '{"status":"COMPLETED"}' $BASE/appointments/$APPT
+curl -s -H "$AUTH" $BASE/leads/$LEAD | jq -r .current_stage          # VISITED
 curl -s -o /dev/null -w "feedback: HTTP %{http_code}\n" -H "$AUTH" \
   -H 'Content-Type: application/json' \
   -d '{"submitted_by":"AGENT","interest_score":4,"objection":"PRICE","close_probability":0.6}' \
   $BASE/appointments/$APPT/feedback
 
 # 8. walk the rest of the funnel to WON
-for s in VISITED NEGOTIATING WON; do
+for s in NEGOTIATING WON; do
   curl -s -o /dev/null -w "-> $s: HTTP %{http_code}\n" -H "$AUTH" \
     -H 'Content-Type: application/json' -d "{\"to_stage\":\"$s\"}" \
     $BASE/leads/$LEAD/transitions
@@ -994,15 +1209,44 @@ curl -s -H "$AUTH" -H 'Content-Type: application/json' \
   $BASE/leads/$LEAD/interactions
 ```
 
-**Rescheduling a confirmed visit** (auto-becomes `RESCHEDULED`, re-checks overlap):
+**Rescheduling a confirmed visit** (re-checks overlap). Alone, it becomes
+`RESCHEDULED` for the owner to re-confirm; the owner moving their own visit
+sends `CONFIRMED` with it:
 ```bash
 curl -s -X PATCH -H "$AUTH" -H 'Content-Type: application/json' \
-  -d '{"scheduled_at":"2026-09-08T15:00:00Z"}' $BASE/appointments/$APPT
+  -d '{"scheduled_at":"2026-09-18T15:00:00Z","status":"CONFIRMED"}' $BASE/appointments/$APPT
 ```
 
-**Only book slots the agent published** — set `ENFORCE_AVAILABILITY=true` on the
-API, then `POST /leads/{id}/appointments` returns **409** for any slot not in
-`GET /agents/{id}/slots`.
+**Only book slots the agent published** — AI agents always are. For people too,
+set `ENFORCE_AVAILABILITY=true` on the API; then `POST /leads/{id}/appointments`
+returns **409** for any slot not in `GET /agents/{id}/slots`.
+
+**Instant booking for the bot** — its bookings land `CONFIRMED` (no waiting for
+the agent) once it holds `visits:manage`. Do this only when agents have
+published their real hours:
+```sql
+update core.service_account
+   set scopes = array_append(scopes, 'visits:manage'), updated_at = now()
+ where name = 'ai-agent';
+```
+
+**An agent's visits on their phone** — `GET /me/calendar-feed`, then Google
+Calendar → *Other calendars → From URL* with `ics_url` (or open `webcal_url` on
+an iPhone). Leaked? `POST /me/calendar-feed/rotate`.
+
+**Keep the bot off an agent's personal appointments** — the agent connects
+their Google calendar's secret iCal address:
+```bash
+curl -s -X PUT -H "$AUTH" -H 'Content-Type: application/json' \
+  -d '{"ics_url":"https://calendar.google.com/calendar/ical/…/private-…/basic.ics"}' \
+  $BASE/me/external-calendar | jq '{last_status, last_error}'
+```
+
+**The "to confirm" queue for one agent this week:**
+```bash
+curl -s -H "$AUTH" "$BASE/agents/$AGENT/calendar?from=2026-09-14T00:00:00Z&to=2026-09-21T00:00:00Z" \
+  | jq '[.events[] | select(.kind=="VISIT" and (.status=="PENDING_CONFIRMATION" or .status=="RESCHEDULED"))]'
+```
 
 **Board filtered to one agent's live deals:**
 ```bash

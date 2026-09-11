@@ -268,11 +268,16 @@ outline:
 * `GET /leads`, `GET /leads/{id}`, `GET /leads/at-risk`
 * `POST /leads/{id}/transitions` — LOST requires a `lost_reason`
 * `POST /leads/{id}/reassign` — TEAM_ADMIN only
-* `GET`/`POST /leads/{id}/interactions`, `.../tasks`, `.../appointments`
-* `PATCH /appointments/{id}`, `POST /appointments/{id}/feedback`
+* `GET`/`POST /leads/{id}/interactions`, `.../tasks`, `.../appointments` — booking:
+  the owner's own visit is born `CONFIRMED`, anyone else's waits for the owner;
+  the same slot again is **200**; confirming/completing moves the lead's stage
+* `GET`/`PATCH /appointments/{id}`, `.../invite.ics`, `GET`/`POST .../feedback`
 * `GET`/`POST`/`PATCH`/`DELETE /agents/{id}/availability` — weekly reachable blocks (HU-05)
-* `GET`/`POST`/`DELETE /agents/{id}/time-off`
-* `GET /agents/{id}/slots?from=&to=` — free 30-min grid: weekly rules − time off − blocking visits
+* `GET`/`POST`/`DELETE /agents/{id}/time-off` — never over a booked visit (409)
+* `GET /agents/{id}/slots?from=&to=&duration_min=` — free starts: weekly rules − time off − blocking visits
+* `GET /agents/{id}/calendar`, `GET /calendar` — the calendar as JSON for a frontend
+* `GET /me/calendar-feed` — a private `.ics` URL for Google/Apple/Outlook;
+  `PUT /me/external-calendar` — the agent's own calendar as busy time (`009`, DECISIONS §19)
 * `GET /listings`, `GET /listings/{id}`, `POST /listings/{id}/views`
 * `GET /analytics/{funnel-daily,agent-response-time,listing-performance,north-star}`
 
@@ -301,8 +306,8 @@ logs a warning if you try. Inspect the jobs with
 ### Domain events
 
 `services/events.emit` writes an `events.domain_event` row **in the request's
-transaction** (`lead.created`, `lead.stage_changed`, `appointment.booked`,
-`lead.went_cold`). The relay above stamps `published_at`, taking its batch
+transaction** (`lead.created`, `lead.stage_changed`, `appointment.booked` and
+every later `appointment.*` change, `lead.went_cold`). The relay above stamps `published_at`, taking its batch
 `for update skip locked` so two runners can never publish the same row.
 The table is on the `supabase_realtime` publication with RLS + an agency policy —
 the only grant `authenticated` holds anywhere in our schemas.
@@ -314,7 +319,11 @@ the only grant `authenticated` holds anywhere in our schemas.
 | `ENABLE_SCHEDULER` | `false` | in-process runner for the two job functions. **Local profile only** — pg_cron owns them on Supabase |
 | `EVENT_RELAY_SECONDS` | `120` | relay interval for that in-process runner (mirrors the pg_cron cadence) |
 | `APP_TIMEZONE` | `America/Bogota` | zone the availability slot maths runs in |
-| `ENFORCE_AVAILABILITY` | `false` | when true, `request_visit` rejects an unpublished slot. Keep false until agents publish real rules |
+| `ENFORCE_AVAILABILITY` | `false` | when true, `request_visit` rejects an unpublished slot. Keep false until agents publish real rules. AI agents are held to published slots regardless |
+| `VISIT_MIN_NOTICE_MINUTES` | `120` | an AI agent never books a visit starting sooner than this |
+| `PUBLIC_BASE_URL` | — | base of the `.ics` feed URLs; set it on Render (`https://homelitics-api.onrender.com`), where the request's own base reads `http://` |
+| `CALENDAR_SYNC_TTL_MINUTES`, `CALENDAR_FETCH_TIMEOUT_S`, `CALENDAR_IMPORT_WINDOW_DAYS` | `15`, `3`, `60` | the agent-calendar import: re-sync age, fetch timeout, how far ahead |
+| `CALENDAR_IMPORT_HOSTS` | Google, Outlook, iCloud | allow-list of hosts the import may fetch (SSRF guard) |
 | `DEV_AUTH_BYPASS` | `false` | local only — identity from `X-Dev-Agent-Id`; app refuses to start against a non-local DB |
 | `SUPABASE_SERVICE_ROLE_KEY`, `DEMO_AGENT_PASSWORD` | — | read **only** by `scripts/provision_agent_users.py`; the API never needs them |
 
@@ -349,11 +358,14 @@ DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/postgres \
 
 ```bash
 API=http://localhost:8000 TOKEN=... CLIENT_ID=... LISTING_ID=... ./scripts/smoke.sh
+# against the local compose stack: DEV_AGENT_ID=<core.agent uuid> instead of TOKEN
 ```
 
 Walks the whole funnel end to end and asserts the interesting statuses: the same
-lead twice (201 then 200, same id), an overlapping visit (409), an illegal stage
-skip (409), and all four analytics endpoints.
+lead twice (201 then 200, same id), the same visit twice (201 then 200), another
+client's overlapping visit (409), the calendar views and the `.ics` feed fetched
+with no auth header, confirming/completing moving the lead's stage, an illegal
+stage skip (409), and all four analytics endpoints.
 
 ---
 
@@ -376,7 +388,7 @@ docker compose --profile local up --build
 ```
 
 Brings up a throwaway `postgres:17-alpine`, applies `migrations/*.sql` on first
-boot (001 → 008 in filename order — `004`'s Realtime block no-ops without an
+boot (001 → 009 in filename order — `004`'s Realtime block no-ops without an
 `auth` schema), runs a one-shot seed (`--scale small --seed 42`), then starts the
 API on `:8000` with `DEV_AUTH_BYPASS=true`. Send `X-Dev-Agent-Id: <core.agent
 uuid>` instead of a bearer token. The API refuses to start if the bypass is on

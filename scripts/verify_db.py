@@ -37,6 +37,8 @@ CORE_TABLES = {
     "agent_availability", "agent_time_off",
     # from 007_ai_agents.sql
     "service_account",
+    # from 009_calendar.sql
+    "agent_external_calendar",
 }
 ANALYTICS_VIEWS = {
     "funnel_daily", "agent_response_time", "listing_performance",
@@ -57,6 +59,8 @@ EXPECTED_INDEXES = {
     "idx_agent_service_account_agency",
     # from 008_telegram_clients.sql
     "uq_person_telegram_user_id",
+    # from 009_calendar.sql
+    "uq_appointment_open_per_lead", "uq_visit_feedback_side", "uq_agent_time_off_ics",
 }
 
 
@@ -188,6 +192,23 @@ def verify_structure(cur):
                                    and column_name='scopes'""") or ""
     check("new service accounts get clients:create (008)", "clients:create" in scopes_default)
 
+    # 009: the models select these columns — core.agent on EVERY authenticated
+    # request — so code deployed ahead of the migration fails everywhere.
+    cur.execute("""select table_name, column_name from information_schema.columns
+                   where table_schema = 'core'
+                     and (table_name, column_name) in (('agent','calendar_token'),
+                                                       ('appointment','created_by'),
+                                                       ('agent_time_off','source'),
+                                                       ('agent_time_off','external_uid'))""")
+    cols = {tuple(r) for r in cur.fetchall()}
+    check("calendar columns exist (009)", len(cols) == 4,
+          "" if len(cols) == 4 else f"only {sorted(cols)} — apply migrations/009_calendar.sql")
+    check("new service accounts get visits:feedback (009)", "visits:feedback" in scopes_default)
+    ungranted = one(cur, """select count(*) from core.service_account
+                            where not ('visits:feedback' = any(scopes))""")
+    check("every service account holds visits:feedback (009)", ungranted == 0,
+          f"{ungranted} account(s) without it" if ungranted else "")
+
     # The reason running without RLS is safe: PostgREST simply cannot reach these
     # schemas. The ONE deliberate exception (004_events_outbox.sql) is a SELECT on
     # events.domain_event for `authenticated`, so Realtime can stream it — and that
@@ -271,6 +292,21 @@ def verify_data(cur):
                               + (select count(*) from core.interaction where channel = 'WHATSAPP')""")
     check("no WHATSAPP rows remain (006 relabelled them TELEGRAM)", stale == 0,
           f"{stale} rows still say WHATSAPP" if stale else "")
+
+    # 009: the calendar drives the funnel, so the two must never disagree.
+    open_on_closed = one(cur, """select count(*) from core.appointment a
+                                 join core.lead l on l.id = a.lead_id
+                                 where a.status in ('PENDING_CONFIRMATION','CONFIRMED','RESCHEDULED')
+                                   and l.current_stage in ('WON','LOST')""")
+    check("no open visit on a closed lead (009)", open_on_closed == 0,
+          f"{open_on_closed} open visits on WON/LOST leads" if open_on_closed else "")
+    unvisited = one(cur, """select count(*) from core.appointment a
+                            where a.status = 'COMPLETED'
+                              and not exists (select 1 from core.lead_stage_transition t
+                                              where t.lead_id = a.lead_id
+                                                and t.to_stage = 'VISITED')""")
+    check("every COMPLETED visit's lead reached VISITED (009)", unvisited == 0,
+          f"{unvisited} completed visits on leads that never reached VISITED" if unvisited else "")
 
     # ---- injected ground truth ----
     print("\nGROUND TRUTH  (seed 42)")

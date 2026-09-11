@@ -124,8 +124,9 @@ async def world(session):
     bot_p = person("bot")
     account = ServiceAccount(
         name=f"{tag} bot", auth_user_id=uuid.uuid4(),
+        # The column default as of 009 — keep in step with the migrations.
         scopes=["leads:create", "leads:transition", "interactions:write",
-                "tasks:write", "visits:request", "clients:create"],
+                "tasks:write", "visits:request", "clients:create", "visits:feedback"],
     )
     session.add_all(agencies + clients_p + owners_p + [p for pair in agents_p for p in pair]
                     + [bot_p, account])
