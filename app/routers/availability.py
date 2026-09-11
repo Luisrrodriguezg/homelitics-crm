@@ -74,6 +74,9 @@ async def list_time_off(agent_id: uuid.UUID, agent: CurrentAgent, session: DbSes
 
 @router.post("/{agent_id}/time-off", response_model=TimeOffOut,
              status_code=status.HTTP_201_CREATED, summary="Book time off",
+             description="Refused with **409** if it overlaps a visit still on the "
+                         "calendar — move or cancel those first.",
+             responses={409: {"model": Message, "description": "Overlaps a booked visit"}},
              dependencies=_WRITE)
 async def add_time_off(
     agent_id: uuid.UUID, payload: TimeOffCreate, agent: CurrentAgent, session: DbSession
@@ -84,7 +87,10 @@ async def add_time_off(
 
 
 @router.delete("/{agent_id}/time-off/{off_id}", status_code=status.HTTP_204_NO_CONTENT,
-               summary="Cancel time off", dependencies=_WRITE)
+               summary="Cancel time off",
+               description="Manual time off only; an imported block (`source: ICS`) is "
+                           "**409** — remove it in the agent's own calendar.",
+               dependencies=_WRITE)
 async def delete_time_off(
     agent_id: uuid.UUID, off_id: uuid.UUID, agent: CurrentAgent, session: DbSession
 ):
@@ -95,17 +101,25 @@ async def delete_time_off(
 
 
 @router.get("/{agent_id}/slots", response_model=SlotsOut,
-            summary="Free 30-minute slots",
-            description="Weekly rules expanded over the window, minus time off and "
-                        "minus appointments that still occupy the calendar.")
+            summary="Free slots for a visit",
+            description="Weekly rules expanded over the window on a 30-minute grid, "
+                        "minus time off (manual and imported from the agent's own "
+                        "calendar) and minus visits that still occupy the calendar. "
+                        "Every start returned leaves room for a visit of `duration_min` "
+                        "(default 30 — pass 60 for a standard visit) and is in the "
+                        "future. This is exactly what an AI agent may book.")
 async def get_slots(
     agent_id: uuid.UUID,
     agent: CurrentAgent,
     session: DbSession,
     from_: datetime = Query(alias="from", description="window start (ISO 8601)"),
     to: datetime = Query(description="window end (ISO 8601)"),
+    duration_min: int = Query(SLOT_MINUTES, ge=15, le=480,
+                              description="length of the visit to fit, in minutes"),
 ):
-    slots = await svc.compute_slots(
-        session, agent_id=agent_id, agency_id=agent.agency_id, start=from_, end=to
+    slots = await svc.free_slots(
+        session, agent_id=agent_id, agency_id=agent.agency_id, start=from_, end=to,
+        duration_min=duration_min,
     )
-    return SlotsOut(agent_id=agent_id, slot_minutes=SLOT_MINUTES, slots=slots)
+    return SlotsOut(agent_id=agent_id, slot_minutes=SLOT_MINUTES,
+                    duration_min=duration_min, slots=slots)

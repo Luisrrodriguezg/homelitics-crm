@@ -99,6 +99,11 @@ class Agent(Base):
     service_account_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("core.service_account.id")
     )
+    # 009. The secret in this agent's .ics feed URL — calendar apps cannot send
+    # a Bearer header. Never serialised anywhere but GET /me/calendar-feed.
+    calendar_token: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), nullable=False, server_default=func.gen_random_uuid()
+    )
     created_at: Mapped[datetime] = _ts(server_default=func.now())
 
     person: Mapped[Person] = relationship(lazy="joined")
@@ -260,6 +265,8 @@ class Appointment(Base):
     scheduled_at: Mapped[datetime] = _ts(nullable=False)
     duration_min: Mapped[int] = mapped_column(SmallInteger, nullable=False, server_default="60")
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default="PENDING_CONFIRMATION")
+    # 009. Who booked it — a human or an AI_AGENT row. NULL on seeded history.
+    created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("core.agent.id"))
     created_at: Mapped[datetime] = _ts(server_default=func.now())
     updated_at: Mapped[datetime] = _ts(server_default=func.now())
 
@@ -353,7 +360,11 @@ class AgentAvailability(Base):
 
 
 class AgentTimeOff(Base):
-    """Ad-hoc unavailability. Half-open [starts_at, ends_at)."""
+    """Ad-hoc unavailability. Half-open [starts_at, ends_at).
+
+    `source` is MANUAL for time off typed in through the API and ICS for a busy
+    block imported from the agent's external calendar (009). A resync only
+    ever touches its own ICS rows."""
     __tablename__ = "agent_time_off"
     __table_args__ = {"schema": "core"}
 
@@ -362,6 +373,23 @@ class AgentTimeOff(Base):
     starts_at: Mapped[datetime] = _ts(nullable=False)
     ends_at: Mapped[datetime] = _ts(nullable=False)
     reason: Mapped[str | None] = mapped_column(Text)
+    source: Mapped[str] = mapped_column(Text, nullable=False, server_default="MANUAL")
+    # ICS only: the event UID plus the occurrence start (an RRULE is many rows).
+    external_uid: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = _ts(server_default=func.now())
+
+
+class AgentExternalCalendar(Base):
+    """The agent's own calendar (009), read for busy time only. `ics_url` is a
+    credential — Google's secret address — so the API masks it on the way out."""
+    __tablename__ = "agent_external_calendar"
+    __table_args__ = {"schema": "core"}
+
+    agent_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("core.agent.id"), primary_key=True)
+    ics_url: Mapped[str] = mapped_column(Text, nullable=False)
+    last_synced_at: Mapped[datetime | None] = _ts()
+    last_status: Mapped[str | None] = mapped_column(Text)
+    last_error: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = _ts(server_default=func.now())
 
 

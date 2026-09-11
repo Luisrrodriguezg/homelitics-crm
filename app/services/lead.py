@@ -144,6 +144,7 @@ async def list_leads(
     stage: str | None = None,
     agent_id: uuid.UUID | None = None,
     listing_id: uuid.UUID | None = None,
+    client_id: uuid.UUID | None = None,
     limit: int = 50,
     offset: int = 0,
 ) -> list[Lead]:
@@ -154,8 +155,42 @@ async def list_leads(
         q = q.where(Lead.agent_id == agent_id)
     if listing_id:
         q = q.where(Lead.listing_id == listing_id)
+    if client_id:
+        # How the bot finds a returning client's threads in this agency.
+        q = q.where(Lead.client_id == client_id)
     q = q.order_by(Lead.updated_at.desc()).limit(limit).offset(offset)
     return list((await session.execute(q)).scalars().all())
+
+
+def insert_transition(
+    session: AsyncSession,
+    *,
+    lead_id: uuid.UUID,
+    from_stage: str | None,
+    to_stage: str,
+    actor: Agent,
+    agency_id: uuid.UUID,
+) -> LeadStageTransition:
+    """Stage one transition and its event in the caller's transaction; no commit.
+
+    The row is the truth and the trigger updates lead.current_stage. The caller
+    has already validated the edge: add_transition against ALLOWED_TRANSITIONS,
+    the calendar (services/appointment) by only ever taking a forward edge the
+    funnel allows.
+    """
+    transition = LeadStageTransition(
+        lead_id=lead_id, from_stage=from_stage, to_stage=to_stage, changed_by=actor.id
+    )
+    session.add(transition)
+    events.emit(
+        session,
+        event_type="lead.stage_changed",
+        aggregate_type="lead",
+        aggregate_id=lead_id,
+        agency_id=agency_id,
+        payload={"from": from_stage, "to": to_stage},
+    )
+    return transition
 
 
 async def add_transition(
@@ -171,7 +206,8 @@ async def add_transition(
 
     LOST additionally requires a lead_lost_detail row. The schema cannot express
     that dependency, so it is written here in the same transaction: either both
-    land or neither does.
+    land or neither does. Closing a lead (WON or LOST) also cancels its open
+    visits in that transaction, so the agent's slot frees up.
     """
     lead = await get_lead(session, lead_id, agent.agency_id)
     current = lead.current_stage
@@ -189,10 +225,10 @@ async def add_transition(
             f"Allowed from {current}: {sorted(allowed) or 'none (terminal)'}",
         )
 
-    transition = LeadStageTransition(
-        lead_id=lead_id, from_stage=current, to_stage=to_stage, changed_by=agent.id
+    transition = insert_transition(
+        session, lead_id=lead_id, from_stage=current, to_stage=to_stage,
+        actor=agent, agency_id=agent.agency_id,
     )
-    session.add(transition)
 
     if to_stage == "LOST":
         reason_id = await session.scalar(
@@ -213,14 +249,10 @@ async def add_transition(
             )
         )
 
-    events.emit(
-        session,
-        event_type="lead.stage_changed",
-        aggregate_type="lead",
-        aggregate_id=lead_id,
-        agency_id=agent.agency_id,
-        payload={"from": current, "to": to_stage},
-    )
+    if to_stage in TERMINAL_STAGES:
+        from app.services.appointment import cancel_open_visits  # lazy: import cycle
+
+        await cancel_open_visits(session, lead_id=lead_id, actor=agent, closed_as=to_stage)
 
     await session.commit()
     await session.refresh(transition)

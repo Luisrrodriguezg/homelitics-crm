@@ -45,6 +45,39 @@ async def test_lead_board_never_leaks_across_agencies(world, client_for):
     assert lead_id not in visible
 
 
+async def test_client_filter_never_leaks_across_agencies(world, client_for):
+    """GET /leads?client_id= is how the bot finds a returning client's threads;
+    clients are global, so the agency filter is the only thing scoping it."""
+    own = client_for(world.agents[0][0])
+    await _lead_in_agency_0(own, world)
+
+    intruder = client_for(world.agents[1][0])
+    r = await intruder.get("/leads", params={"client_id": str(world.clients[0].id)})
+    assert r.status_code == 200 and r.json() == []
+
+
+async def test_other_agency_cannot_touch_a_visit(world, client_for):
+    """Every per-visit route answers 404 outside the agency (009's included)."""
+    from datetime import datetime, timedelta, timezone
+
+    own = client_for(world.agents[0][0])
+    lead_id = await _lead_in_agency_0(own, world)
+    when = (datetime.now(timezone.utc) + timedelta(days=3)).replace(microsecond=0)
+    appt = (await own.post(f"/leads/{lead_id}/appointments",
+                           json={"scheduled_at": when.isoformat()})).json()["id"]
+
+    intruder = client_for(world.agents[1][0])
+    for path in (f"/appointments/{appt}", f"/appointments/{appt}/invite.ics",
+                 f"/appointments/{appt}/feedback", f"/leads/{lead_id}/appointments"):
+        assert (await intruder.get(path)).status_code == 404, path
+    r = await intruder.patch(f"/appointments/{appt}", json={"status": "CANCELLED"})
+    assert r.status_code == 404
+    r = await intruder.get(f"/agents/{world.agents[0][0].id}/slots",
+                           params={"from": when.isoformat(),
+                                   "to": (when + timedelta(days=1)).isoformat()})
+    assert r.status_code == 404
+
+
 async def test_cannot_use_another_agencys_listing(world, client_for):
     """Creating a lead against a listing you do not own must 404, not silently
     attach the lead to the other agency's agent."""

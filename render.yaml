@@ -31,6 +31,10 @@ services:
       # frontend's URL (comma-separated if several) once one exists.
       - key: CORS_ORIGINS
         value: "*"
+      # The .ics feed URLs handed to agents are built from this. uvicorn does not
+      # trust Render's proxy headers, so without it they would read http://.
+      - key: PUBLIC_BASE_URL
+        value: https://homelitics-api.onrender.com
       - key: SUPABASE_PROJECT_REF
         value: msmpbounvqtfobcfyffr   # public, it is in every Supabase URL
       - key: SUPABASE_JWT_SECRET      # leave EMPTY on modern (JWKS) projects

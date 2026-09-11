@@ -13,6 +13,11 @@ pyjwt[crypto]==2.10.1
 # --- inactivity job ---
 apscheduler==3.11.0
 
+# --- calendar (009): .ics export + import of an agent's busy time ---
+icalendar==7.3.0
+recurring-ical-events==3.8.2
+httpx==0.28.1               # fetches the agent's calendar; also the test client
+
 # --- seeding & verification (psycopg2, sync, session pooler on 5432) ---
 faker==33.1.0
 psycopg2-binary==2.9.10
@@ -20,4 +25,3 @@ psycopg2-binary==2.9.10
 # --- tests ---
 pytest==8.3.4
 pytest-asyncio>=0.26.0
-httpx==0.28.1

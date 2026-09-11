@@ -52,6 +52,8 @@ create table core.agent (
   role       text not null default 'AGENT' check (role in ('AGENT','TEAM_ADMIN','AI_AGENT')),
   active     boolean not null default true,
   auth_user_id uuid,   -- Supabase auth.users.id; populated by scripts/bind_agents.py
+  -- 009: the secret in this agent's .ics feed URL (calendar apps send no Bearer header)
+  calendar_token uuid not null default gen_random_uuid(),
   created_at timestamptz not null default now()
 );
 
@@ -65,7 +67,7 @@ create table core.service_account (
   name               text not null unique,
   auth_user_id       uuid not null unique,
   scopes             text[] not null
-                     default '{leads:create,leads:transition,interactions:write,tasks:write,visits:request,clients:create}',
+                     default '{leads:create,leads:transition,interactions:write,tasks:write,visits:request,clients:create,visits:feedback}',
   hourly_write_limit integer not null default 300 check (hourly_write_limit > 0),
   active             boolean not null default true,
   created_at         timestamptz not null default now(),
@@ -236,12 +238,18 @@ create table core.appointment (
   duration_min smallint not null default 60,
   status       text not null default 'PENDING_CONFIRMATION'
                check (status in ('PENDING_CONFIRMATION','CONFIRMED','RESCHEDULED','CANCELLED','COMPLETED','NO_SHOW')),
+  created_by   uuid references core.agent(id),   -- 009: who booked it (human or AI_AGENT)
   created_at   timestamptz not null default now(),
   updated_at   timestamptz not null default now()
 );
 
 create index idx_appointment_lead  on core.appointment (lead_id);
 create index idx_appointment_agent on core.appointment (agent_id, scheduled_at);
+
+-- 009: at most one open visit per lead; mirrors services/appointment._BLOCKING
+create unique index uq_appointment_open_per_lead
+  on core.appointment (lead_id)
+  where status in ('PENDING_CONFIRMATION','CONFIRMED','RESCHEDULED');
 
 create table core.objection (
   id   uuid primary key default gen_random_uuid(),
@@ -261,6 +269,10 @@ create table core.visit_feedback (
   free_text         text,
   created_at        timestamptz not null default now()
 );
+
+-- 009: one feedback per side (AGENT, CLIENT) per visit
+create unique index uq_visit_feedback_side
+  on core.visit_feedback (appointment_id, submitted_by);
 
 create table core.follow_up_task (
   id         uuid primary key default gen_random_uuid(),
@@ -470,6 +482,9 @@ create table if not exists core.agent_time_off (
   ends_at    timestamptz not null,
   reason     text,
   created_at timestamptz not null default now(),
+  -- 009: MANUAL = typed in; ICS = imported from the agent's own calendar
+  source       text not null default 'MANUAL' check (source in ('MANUAL','ICS')),
+  external_uid text,   -- ICS only: event UID + occurrence start
   check (starts_at < ends_at)
 );
 
@@ -477,6 +492,20 @@ create index if not exists idx_agent_availability_agent
   on core.agent_availability (agent_id, weekday);
 create index if not exists idx_agent_time_off_agent
   on core.agent_time_off (agent_id, starts_at, ends_at);
+create unique index if not exists uq_agent_time_off_ics
+  on core.agent_time_off (agent_id, external_uid)
+  where source = 'ICS';
+
+-- 009: the agent's own calendar (Google's secret iCal address), read for busy
+-- time only. The URL is a credential; the API masks it on the way out.
+create table if not exists core.agent_external_calendar (
+  agent_id       uuid primary key references core.agent(id) on delete cascade,
+  ics_url        text not null,
+  last_synced_at timestamptz,
+  last_status    text check (last_status in ('OK','ERROR')),
+  last_error     text,
+  created_at     timestamptz not null default now()
+);
 
 -- ============================================================
 -- 004_events_outbox.sql — domain-event outbox + surgical Realtime grant

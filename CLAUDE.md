@@ -41,8 +41,9 @@ Target metrics (from the backlog):
   so re-running wipes and recreates. Paste into Supabase SQL Editor and Run.
   Click "Run without RLS" on the warning popup. Run `scripts/verify_db.py` first —
   if the live schema has drifted, this file will silently destroy it.
-- `migrations/` — `001_schema.sql` (the baseline) then `002`–`008` (additive,
-  idempotent). `schema-2.sql` is kept equal to 001 + … + 008.
+- `migrations/` — `001_schema.sql` (the baseline) then `002`–`009` (additive,
+  idempotent). `schema-2.sql` is kept equal to 001 + … + 009 (folded in place,
+  not appended — diff the catalogs of both on a throwaway DB to check).
 - `render.yaml` — free Render deploy. `scripts/provision_agent_users.py` — one
   Auth login per real agent (Admin API), replaces hand-made users.
 - `seed.py` — deterministic synthetic data generator.
@@ -50,16 +51,17 @@ Target metrics (from the backlog):
 - `app/` — the FastAPI service. `README.md` covers setup and the EC2 runbook;
   `docs/DECISIONS.md` records the structural choices and why.
 
-## Schema (24 tables, 4 schemas)
+## Schema (25 tables, 4 schemas)
 
 **`pii`** — `person`. Every human lives here exactly once. `telegram_user_id`
 (`008`, UNIQUE) is how a returning Telegram contact is recognised.
 
-**`core`** (22) — `agency`, `agent`, `owner`, `client`, `property`, `listing`,
+**`core`** (23) — `agency`, `agent`, `owner`, `client`, `property`, `listing`,
 `lead`, `lead_stage`, `lead_stage_transition`, `lost_reason`, `lead_lost_detail`,
 `interaction`, `appointment`, `objection`, `visit_feedback`, `follow_up_task`,
 `assignment_audit`, `offer`, `deal`, `agent_availability`, `agent_time_off`
-(`003`), `service_account` (`007` — the credential behind an AI agent)
+(`003`), `service_account` (`007` — the credential behind an AI agent),
+`agent_external_calendar` (`009` — an agent's own calendar, read for busy time)
 
 **`events`** — `property_view` (append-only, one row per listing page view)
 
@@ -114,8 +116,9 @@ exclusively, never from `core` — which is why **every** one of the five expose
 - **Agent availability** — `003_availability.sql` adds `core.agent_availability`
   (weekly rules) + `core.agent_time_off`. Slot maths is in the API
   (`services/availability.compute_slots`, `America/Bogota`). HU-02 is still
-  *request → confirm*; `request_visit` enforces availability only when
-  `ENFORCE_AVAILABILITY=true` (default false). See `docs/DECISIONS.md` §11.
+  *request → confirm* (the lead's owner confirms); for people `request_visit`
+  enforces availability only when `ENFORCE_AVAILABILITY=true` (default false),
+  AI agents always. See `docs/DECISIONS.md` §11 and §19.
 
 Also deferred, additive if needed: `listing_price_history`, `message_template`,
 `notification`, `search_event`.
@@ -177,7 +180,8 @@ Endpoints cover all five priorities: create-or-return lead (via the UNIQUE guard
 confirm → feedback, `/leads/at-risk` plus an hourly pg_cron sweep (`005`), and
 analytics reading `analytics.*` only. Plus (Phase 4) `/agents/{id}/availability`,
 `.../time-off`, `.../slots`, and the `events.domain_event` outbox with a 30s
-relay (`jobs.relay_events`, `on_lead_created` → first-touch follow-up).
+relay (`jobs.relay_events`, `on_lead_created` → first-touch follow-up). Plus
+(`009`) the calendar — see below.
 
 `docs/API_GUIDE.md` is the full consume-the-API guide (auth, every endpoint with
 examples, the event model, an end-to-end walkthrough). `docs/AC_COVERAGE.md` is
@@ -216,10 +220,40 @@ agency, so `services/client` is the one service function without an
 `agency_id`; the guard is that `ClientOut` returns only `id` + `created_at`,
 never PII.
 
+### The calendar (009)
+
+**`core.appointment` is the calendar** — no calendar table. Rules in
+`services/appointment.py`, views in `services/calendar.py`, busy-time import in
+`services/calendar_import.py`; reasoning in `docs/DECISIONS.md` §19.
+
+- **Status is the owning agent's consent.** The owner's own booking is born
+  CONFIRMED; the bot's or a colleague's is PENDING_CONFIRMATION until the owner
+  confirms. A bot granted `visits:manage` books CONFIRMED (instant booking —
+  hold until agents publish real hours).
+- **AI agents** book only inside `/slots` and ≥ `VISIT_MIN_NOTICE_MINUTES`
+  ahead; they may move and cancel (PATCH is on `visits:request`), never
+  confirm without `visits:manage`, never record COMPLETED/NO_SHOW, and leave
+  feedback only as CLIENT (`visits:feedback`).
+- **One open visit per lead** (`uq_appointment_open_per_lead`): the same slot
+  again is 200 (a bot retry), another is 409. One feedback per side.
+- **The calendar drives the funnel:** CONFIRMED → lead VISIT_SCHEDULED,
+  COMPLETED → VISITED, WON/LOST → open visits CANCELLED. Ordinary transitions,
+  `changed_by` = actor. Every visit write also adds a STATUS_CHANGE timeline
+  line (counted in the bot budget, never a response) and an `appointment.*` event.
+- **Manual time off never covers a booked visit** (409). Busy time imported from
+  the agent's own calendar (`source='ICS'`) can, and flags the visit `conflict`.
+- **Out:** JSON views (`/agents/{id}/calendar`, `/calendar`), a token-URL `.ics`
+  feed per agent (`/me/calendar-feed`), a per-visit `invite.ics` +
+  `google_calendar_url` for the client. **In:** `PUT /me/external-calendar`
+  (Google/Outlook/iCloud secret address; on-demand sync, 15 min TTL, host
+  allow-list). Never inside `compute_slots` — it runs under the booking lock.
+- **The bot is reactive:** nothing is pushed to clients; it reads the state when
+  the client writes. `docs/API_GUIDE.md` §6.10 is the bot's scheduling script.
+
 ### Local one-command dev
 
 `docker compose --profile local up --build` — throwaway `postgres:17-alpine`,
-`migrations/*.sql` auto-applied on first boot (001→008), one-shot `seed`
+`migrations/*.sql` auto-applied on first boot (001→009), one-shot `seed`
 (`--scale small --seed 42`), API with `DEV_AUTH_BYPASS=true` (identity from
 `X-Dev-Agent-Id`; the app refuses to start with the bypass on against a
 non-local DB). No `.env`, no Supabase.
@@ -244,6 +278,11 @@ auto-note had been counting as their first response). Ground truth held: slow
 28.8h vs fast 2.0h.
 `008` went on 2026-09-11 the same way (column + unique index + `clients:create`
 granted to `ai-agent`; no rows changed); `verify_db.py` 30/30.
+`009` (calendar) is **written but NOT yet applied** to the live DB. Checked
+against live data first: zero leads with two open visits, zero duplicate
+feedback per side, zero open visits on closed leads, zero COMPLETED visits whose
+lead skipped VISITED — so both UNIQUE indexes build and no funnel row changes.
+Apply it before the calendar code merges (see Outstanding).
 Worktrees have no `.env`; scripts use the main checkout's
 `/Users/luisrro/Desktop/Proyecto Home/.env`.
 
@@ -254,10 +293,15 @@ The AI agent is provisioned: service account `ai-agent` exists with an
 
 - **Deploy order for future migrations:** apply to `homelitics` **before**
   merging code that uses them — Render auto-deploys, and a model column the DB
-  lacks breaks every query on that table.
+  lacks breaks every query on that table. For `009` that is every request:
+  `Agent.calendar_token` is mapped and every authenticated call loads
+  `core.agent`. After the merge, check `GET /me/calendar-feed` returns
+  `https://` URLs — `PUBLIC_BASE_URL` comes from `render.yaml`, which Render
+  applies only if the Blueprint syncs; otherwise set it in the dashboard.
 - **The Telegram bot itself** lives outside this repo. Flow per message:
-  `POST /clients` (with `telegram_user_id`) → `POST /leads` → later messages as
-  `POST /leads/{id}/interactions`. `docs/API_GUIDE.md` §2d.
+  `POST /clients` (with `telegram_user_id`) → `GET /leads?client_id=` or
+  `POST /leads` → `/slots` → `POST .../appointments` → `invite.ics`; later
+  messages read the visit's current state. `docs/API_GUIDE.md` §2d and §6.10.
 - **Logins:** `python scripts/provision_agent_users.py` (needs
   `SUPABASE_SERVICE_ROLE_KEY` + `DEMO_AGENT_PASSWORD` in `.env`). Until then every
   authenticated request returns 403; `DEV_AUTH_BYPASS` sidesteps this locally.

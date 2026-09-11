@@ -24,6 +24,8 @@ TaskStatus = Literal["PENDING", "DONE", "SNOOZED"]
 OperationType = Literal["SALE", "RENT"]
 ListingStatus = Literal["ACTIVE", "PAUSED", "CLOSED"]
 SubmittedBy = Literal["AGENT", "CLIENT"]
+TimeOffSource = Literal["MANUAL", "ICS"]
+CalendarEventKind = Literal["VISIT", "TIME_OFF", "AVAILABILITY"]
 
 TERMINAL_STAGES: frozenset[str] = frozenset({"WON", "LOST"})
 
@@ -186,8 +188,20 @@ class AppointmentOut(ORMModel):
     scheduled_at: datetime
     duration_min: int
     status: AppointmentStatus
+    # Who booked it (a human agent or an AI_AGENT row); null on seeded history.
+    created_by: uuid.UUID | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class AppointmentDetail(AppointmentOut):
+    """One visit with what a client needs to find it: GET /appointments/{id}."""
+    listing_id: uuid.UUID
+    location: str
+    agent_name: str | None = None
+    # "Add to Google Calendar" link — works on Android, where the Calendar app
+    # cannot open an .ics file. The .ics itself is GET .../invite.ics.
+    google_calendar_url: str
 
 
 class FeedbackCreate(BaseModel):
@@ -324,12 +338,80 @@ class TimeOffOut(ORMModel):
     starts_at: datetime
     ends_at: datetime
     reason: str | None
+    # MANUAL = typed in through the API; ICS = imported from the agent's calendar.
+    source: TimeOffSource = "MANUAL"
 
 
 class SlotsOut(BaseModel):
     agent_id: uuid.UUID
     slot_minutes: int
+    # Every slot start leaves room for a visit this long (the `duration_min` asked for).
+    duration_min: int
     slots: list[datetime]
+
+
+# ----------------------------------------------------------------- calendar
+
+class CalendarEventOut(BaseModel):
+    """One block on a calendar, shaped so FullCalendar can take it as-is.
+
+    VISIT is an appointment; TIME_OFF is manual or imported busy time;
+    AVAILABILITY is the agent's published hours, meant as a background.
+    """
+    id: str
+    kind: CalendarEventKind
+    agent_id: uuid.UUID
+    agent_name: str | None = None
+    start: datetime
+    end: datetime
+    title: str
+    # VISIT only
+    status: AppointmentStatus | None = None
+    lead_id: uuid.UUID | None = None
+    listing_id: uuid.UUID | None = None
+    location: str | None = None
+    booked_by_bot: bool | None = None
+    # True when an imported busy block overlaps this visit — the agent decides.
+    conflict: bool | None = None
+    # TIME_OFF only
+    source: TimeOffSource | None = None
+
+
+class CalendarOut(BaseModel):
+    timezone: str
+    events: list[CalendarEventOut]
+
+
+class CalendarFeedOut(BaseModel):
+    """The agent's private feed. Paste into Google Calendar ("From URL") or
+    subscribe in Apple Calendar. Anyone holding the URL can read the visits."""
+    ics_url: str
+    webcal_url: str
+
+
+class ExternalCalendarIn(BaseModel):
+    ics_url: str = Field(
+        min_length=12, max_length=2000,
+        description="The calendar's secret iCal address, e.g. Google Calendar → "
+                    "Settings → Integrate calendar → Secret address in iCal format.",
+    )
+
+
+class ExternalCalendarOut(BaseModel):
+    # Never the full URL: it is a credential for the agent's whole calendar.
+    ics_url_masked: str
+    last_synced_at: datetime | None
+    last_status: Literal["OK", "ERROR"] | None
+    last_error: str | None
+    created_at: datetime
+
+
+class CalendarSyncOut(BaseModel):
+    status: Literal["OK", "ERROR"]
+    imported: int
+    removed: int
+    skipped: int
+    error: str | None = None
 
 
 # ---------------------------------------------------------------- analytics

@@ -38,21 +38,39 @@ class Settings(BaseSettings):
     # Agents publish availability in local time; slot maths happens in this zone.
     app_timezone: str = Field(default="America/Bogota", alias="APP_TIMEZONE")
     # When true, request_visit rejects a slot the agent has not published.
-    # Default false so the existing overlap tests keep their meaning.
+    # Default false so the existing overlap tests keep their meaning. AI agents
+    # are held to published slots regardless (services/appointment.py).
     enforce_availability: bool = Field(default=False, alias="ENFORCE_AVAILABILITY")
+    # An AI agent may not book or move a visit to start sooner than this.
+    visit_min_notice_minutes: int = Field(default=120, alias="VISIT_MIN_NOTICE_MINUTES")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     cors_origins: str = Field(default="*", alias="CORS_ORIGINS")
+
+    # --- calendar (009) ---
+    # Base of the .ics feed URLs handed to agents. Unset -> the request's own
+    # base URL, which reads http:// behind Render's proxy — set it there.
+    public_base_url: str | None = Field(default=None, alias="PUBLIC_BASE_URL")
+    # Import of an agent's external calendar (busy time -> time off).
+    calendar_sync_ttl_minutes: int = Field(default=15, alias="CALENDAR_SYNC_TTL_MINUTES")
+    calendar_fetch_timeout_s: float = Field(default=3.0, alias="CALENDAR_FETCH_TIMEOUT_S")
+    calendar_import_window_days: int = Field(default=60, alias="CALENDAR_IMPORT_WINDOW_DAYS")
+    # The API fetches whatever URL an agent pastes, so only these hosts are
+    # allowed (SSRF guard). A leading dot matches subdomains (iCloud's pNN-caldav).
+    calendar_import_hosts: str = Field(
+        default="calendar.google.com,outlook.office365.com,outlook.live.com,.icloud.com",
+        alias="CALENDAR_IMPORT_HOSTS",
+    )
 
     # --- local dev only ---
     # Skip Supabase JWT entirely and take the acting agent from X-Dev-Agent-Id.
     # Guarded in __init__: refused unless DATABASE_URL points at localhost/db.
     dev_auth_bypass: bool = Field(default=False, alias="DEV_AUTH_BYPASS")
 
-    @field_validator("supabase_jwt_secret", mode="before")
+    @field_validator("supabase_jwt_secret", "public_base_url", mode="before")
     @classmethod
     def _blank_is_none(cls, v):
         # An empty SUPABASE_JWT_SECRET= line in .env must mean "use JWKS",
-        # not "the secret is the empty string".
+        # not "the secret is the empty string". Same for PUBLIC_BASE_URL=.
         return v or None
 
     @field_validator("database_url")
@@ -106,6 +124,10 @@ class Settings(BaseSettings):
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+    @property
+    def calendar_import_host_list(self) -> list[str]:
+        return [h.strip().lower() for h in self.calendar_import_hosts.split(",") if h.strip()]
 
 
 @lru_cache

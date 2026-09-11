@@ -202,6 +202,11 @@ calendar.
 **Revisit if** availability becomes an external service — the tables are a thin
 local cache and `compute_slots` is the only consumer.
 
+**Revisited 2026-09-11 (§19).** Part of it did: an agent's own calendar now
+feeds busy time into `agent_time_off` (`source='ICS'`), and `compute_slots`
+still needed no new logic. AI agents are held to published slots whatever
+`ENFORCE_AVAILABILITY` says.
+
 ---
 
 ## 12. Domain events: a transactional outbox, not Kafka (004_events_outbox.sql)
@@ -213,7 +218,8 @@ event *data model* without the infrastructure:
   commit of its own, so an event exists iff the business transaction commits.
   Call sites: `create_or_get_lead` → `lead.created`, `add_transition` →
   `lead.stage_changed`, `request_visit` → `appointment.booked`, the inactivity
-  sweep → `lead.went_cold`.
+  sweep → `lead.went_cold`; since 009 every other visit change too
+  (`appointment.confirmed|rescheduled|cancelled|completed|no_show`, §19).
 * `jobs.relay_events` runs every `EVENT_RELAY_SECONDS` (same `ENABLE_SCHEDULER`
   gate as the sweep), dispatches unpublished rows to in-process handlers and
   stamps `published_at`. A handler that raises leaves the row unpublished with
@@ -432,3 +438,108 @@ client is not counted in the bot's hourly write budget and emits no event.
 **Revisit if** another channel needs dedup: add a digits-only phone column with
 a UNIQUE index — after deciding what happens to the 92 fixture pairs, which are
 ground truth for the data-quality tests.
+
+---
+
+## 19. The calendar is `core.appointment`; everything else is a view of it (009_calendar.sql)
+
+**Decision.** No calendar table, no event model. One `core.appointment` row is
+one visit — lead, agent, time, status — and that set of rows *is* the calendar.
+Availability and time off constrain it, `/slots` is its booking engine, and
+every outside calendar is a one-way view: JSON for the frontend
+(`GET /agents/{id}/calendar`, `GET /calendar`), a private `.ics` feed per agent
+for Google/Apple/Outlook, one `.ics` + a Google link per visit for the client.
+The only thing that comes *in* is busy time from the agent's own calendar,
+stored as `agent_time_off` rows with `source='ICS'`. Rules in
+`services/appointment.py`, rendering in `services/calendar.py`, import in
+`services/calendar_import.py`.
+
+**Status is the owning agent's consent.** A visit the lead's owner books is born
+`CONFIRMED`; one booked by anyone else — the bot on the client's behalf, a
+colleague — is `PENDING_CONFIRMATION` until the owner confirms (HU-02). That
+single rule answers "who confirms" for every mix of agent-created and
+bot-created leads. The client's consent is conversational, not a status.
+
+**The bot is reactive (decided with Luis, 2026-09-11).** No push to clients: no
+events feed, no Realtime subscription, no Telegram call from the API. When the
+client writes, the bot reads the lead's visits and shows their current state.
+Accepted consequences: an agent who moves or cancels a confirmed visit tells the
+client themselves; a client learns a pending visit was confirmed only by asking;
+feedback comes only from clients who write again. *Instant booking* removes the
+second one without a deploy: grant the service account `visits:manage` and its
+bookings land `CONFIRMED` — once agents publish real hours (AC_COVERAGE, 1.4).
+
+**What an AI agent may do to a visit.** Book (`visits:request`) — only inside
+`/slots` and at least `VISIT_MIN_NOTICE_MINUTES` ahead, whatever
+`ENFORCE_AVAILABILITY` says for humans. Move or cancel (`PATCH` now sits on
+`visits:request`). Confirm only with `visits:manage` — the `leads:close`
+pattern. Never `COMPLETED`/`NO_SHOW`: a bot did not witness the visit. Record
+feedback only as `submitted_by=CLIENT` (`visits:feedback`, granted by 009).
+
+**One open visit per lead** (`uq_appointment_open_per_lead`). A bot on a host
+that sleeps retries after timeouts; with the old rules its retry got a 409 from
+its own booking and looked like a lost slot. Now the same slot returns the same
+visit with 200 (§4's pattern), another slot is a 409 "PATCH it instead", and
+"the client's visit" is unambiguous. `uq_visit_feedback_side` does the same for
+feedback. Live data had zero violations of either when they were added.
+
+**The calendar drives the funnel.** `CONFIRMED` moves an `INTERESTED` lead to
+`VISIT_SCHEDULED`; `COMPLETED` moves `VISIT_SCHEDULED` to `VISITED`; `WON`/`LOST`
+cancels the lead's open visits. All written as ordinary transitions with
+`changed_by` = the actor, so rule 3 ("transitions are truth") holds and an agent
+who marks a visit done without touching the board no longer undercounts
+lead→visit conversion. `verify_db.py` asserts both directions on the data.
+
+**Every visit write leaves a trace.** One outbox event
+(`appointment.booked|confirmed|rescheduled|cancelled|completed|no_show`, with
+`actor_id` and `by_bot`) and one `STATUS_CHANGE` line on the lead's timeline,
+attributed to the actor. The line is how an agent sees what the bot did, and it
+is what makes a bot's calendar writes count toward its hourly budget — without
+ever counting as a response (§17's definition is MESSAGE/CALL only).
+
+**The agent's own schedule.** Weekly rules only shape future bookings; booked
+visits are commitments. Manual time off that overlaps a booked visit is a 409
+listing the visits, under the same per-agent lock as booking (§3). Busy time
+imported from the agent's calendar is stored anyway and flags the visit
+`conflict: true` — it is a fact about their life, not a request.
+
+**The feed's token is the credential.** Calendar apps send no Authorization
+header, so `core.agent.calendar_token` travels in the URL; any mismatch is a
+404 that confirms nothing, rotation is `POST /me/calendar-feed/rotate`. Stored
+in plain text so the agent can re-read their URL; anyone who can read
+`core.agent` already sees the visits themselves. The feed carries the client's
+first name only — it leaves the CRM into Google's servers — and a subscribed
+feed re-reads on refresh, so an erasure (rule 1) reaches it. The client's own
+`.ics` carries nothing about the client.
+
+**The import is a write on a read path.** An agent pastes their calendar's
+secret iCal address; `maybe_refresh` re-syncs it when older than 15 min, from
+the routes that read a calendar and before a booking takes its lock — never
+inside `compute_slots`, which runs under that lock. A 3 s timeout, a 2 MB cap
+and swallow-all-errors keep a dead feed from failing a request; stale busy time
+is the failure mode. Because the API fetches what an agent pastes, only
+`https`/`webcal` URLs on `CALENDAR_IMPORT_HOSTS` are accepted, redirects
+included (SSRF). Only start and end are kept, never titles. Our own
+`@homelitics` UIDs are skipped, so a copied invite is not imported back as
+busy time over itself.
+
+**Not built, and why.**
+- Google Calendar API / Microsoft Graph: per-agent OAuth, token storage, push
+  channels to an always-on HTTPS endpoint, consent-screen review. Two-way sync is
+  weeks; the feed plus the import cover the MVP.
+- Email invites (iTIP `REQUEST`): need a mail provider and real addresses —
+  agent emails are `.test`.
+- Cal.com / Calendly: the visit is the funnel's core event and has to live in
+  `core.appointment`.
+- Reminders: a pg_cron job away, but nothing would deliver them to a reactive bot.
+
+**Caveats that are not bugs.** Google refreshes a subscribed calendar on its own
+schedule (hours) and cannot be forced; Apple can refresh every 5–15 minutes. On
+the free Render host a fetch that lands on a cold start may fail and retry next
+cycle. The JSON calendar is the live view; the feed is a mirror. Open visits stay
+with the old agent when a lead is reassigned — unchanged.
+
+**Revisit if** clients need to hear about agent-side changes (then deliver the
+`appointment.*` events — the data is already in the outbox), or if agents need
+visits written into their Google Calendar as real events (that direction needs
+OAuth).
