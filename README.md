@@ -378,8 +378,9 @@ docker compose logs -f api
 ```
 
 `env_file: .env`, nothing baked into the image, `.env` excluded by
-`.dockerignore`. Non-root user, healthcheck on `/health` (which round-trips to
-Postgres, so a broken database marks the container unhealthy).
+`.dockerignore`. Non-root user, healthcheck on `/health`. It checks that
+Postgres answers and has every column the models map, so a broken database,
+or code deployed ahead of its migration, marks the container unhealthy.
 
 ### One-command local stack (no Supabase, no `.env`)
 
@@ -457,6 +458,7 @@ in pg_cron, and `ENABLE_SCHEDULER` stays `false` on every replica. DECISIONS.md 
 |---|---|
 | `prepared statement __asyncpg_stmt_x__ does not exist` | `statement_cache_size: 0` missing, or you are on 5432 instead of 6543 |
 | Everything 403s, `/health` fine | No agent bound — run `scripts/provision_agent_users.py` |
+| `/health` 503 `schema behind the code … missing: [...]` | Code merged before its migration. Apply the migration to `homelitics`, then redeploy |
 | `pytest` exits immediately with "not a local database" | Deliberate guard. Point `DATABASE_URL` at the compose Postgres, or set `ALLOW_REMOTE_TEST_DB=1` and purge afterwards |
 | No follow-ups ever appear on Supabase | `005` not applied, or the pg_cron jobs are inactive: `select * from cron.job` |
 | 401 with a token that works elsewhere | Token is from a different Supabase project; `iss`/`aud` are checked |

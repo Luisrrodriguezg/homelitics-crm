@@ -271,18 +271,21 @@ default Mon–Fri availability for the 48 agents) — the exact SQL is in the
 session's `phase0_cleanup.sql`; `scripts/purge_test_rows.sql` is the reusable part.
 `tests/conftest.py` now refuses a non-local `DATABASE_URL` so debris cannot recur.
 
-Migrations `001`–`008` are applied to the live DB; `scripts/verify_db.py` is green
-(28/28). `007` went on 2026-09-10 via the Supabase connector's `apply_migration`;
+Migrations `001`–`009` are applied to the live DB; `scripts/verify_db.py` is green
+(35/35). `007` went on 2026-09-10 via the Supabase connector's `apply_migration`;
 its new response definition moved 96 leads to `never_answered` (the 72h sweep's
 auto-note had been counting as their first response). Ground truth held: slow
 28.8h vs fast 2.0h.
 `008` went on 2026-09-11 the same way (column + unique index + `clients:create`
 granted to `ai-agent`; no rows changed); `verify_db.py` 30/30.
-`009` (calendar) is **written but NOT yet applied** to the live DB. Checked
-against live data first: zero leads with two open visits, zero duplicate
-feedback per side, zero open visits on closed leads, zero COMPLETED visits whose
-lead skipped VISITED — so both UNIQUE indexes build and no funnel row changes.
-Apply it before the calendar code merges (see Outstanding).
+`009` (calendar) went on 2026-09-14 the same way, **three days late**: its code
+merged on 2026-09-11, and Render deployed it against a DB with no
+`core.agent.calendar_token`. Every authenticated route returned a bare 500 until
+the apply, while `/health` stayed green because it only ran `select 1`. The
+pre-flight held (zero leads with two open visits, zero duplicate feedback per
+side, zero funnel mismatches), so both UNIQUE indexes built and no funnel row
+changed; `visits:feedback` was granted to `ai-agent`. `verify_db.py` 35/35,
+ground truth unchanged.
 Worktrees have no `.env`; scripts use the main checkout's
 `/Users/luisrro/Desktop/Proyecto Home/.env`.
 
@@ -292,12 +295,17 @@ The AI agent is provisioned: service account `ai-agent` exists with an
 ### Outstanding
 
 - **Deploy order for future migrations:** apply to `homelitics` **before**
-  merging code that uses them — Render auto-deploys, and a model column the DB
-  lacks breaks every query on that table. For `009` that is every request:
-  `Agent.calendar_token` is mapped and every authenticated call loads
-  `core.agent`. After the merge, check `GET /me/calendar-feed` returns
-  `https://` URLs — `PUBLIC_BASE_URL` comes from `render.yaml`, which Render
-  applies only if the Blueprint syncs; otherwise set it in the dashboard.
+  merging code that uses them. Render auto-deploys, and a model column the DB
+  lacks breaks every query on that table (009 broke every request, because
+  `core.agent` is loaded on each authenticated call). `/health` now compares
+  every mapped column against the live catalog and returns 503 if one is
+  missing, so such a deploy fails Render's health check. It should keep the
+  previous build serving; that is unconfirmed on the free plan until it first
+  triggers. After applying the migration, redeploy by hand ("Deploy latest
+  commit").
+- **Check `GET /me/calendar-feed` returns `https://` URLs** (needs a token).
+  `PUBLIC_BASE_URL` comes from `render.yaml`, which Render applies only if the
+  Blueprint syncs; otherwise set it in the dashboard.
 - **The Telegram bot itself** lives outside this repo. Flow per message:
   `POST /clients` (with `telegram_user_id`) → `GET /leads?client_id=` or
   `POST /leads` → `/slots` → `POST .../appointments` → `invite.ics`; later
