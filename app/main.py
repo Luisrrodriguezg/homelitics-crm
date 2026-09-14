@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.config import get_settings
 from app.db import dispose_engine
@@ -98,6 +99,20 @@ async def value_error_handler(request: Request, exc: ValueError):
     """Service-layer ValueErrors are client mistakes, not 500s."""
     return JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, content={"detail": str(exc)}
+    )
+
+
+@app.exception_handler(SQLAlchemyError)
+async def database_error_handler(request: Request, exc: SQLAlchemyError):
+    """Still a 500, but JSON and inside CORS.
+
+    Left to Starlette it is a text/plain 500 from ServerErrorMiddleware, which
+    sits outside CORSMiddleware, so a browser reports a CORS error instead. The
+    traceback goes to the log; the response never carries database internals.
+    """
+    log.error("database error on %s %s", request.method, request.url.path, exc_info=exc)
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, content={"detail": "database error"}
     )
 
 
