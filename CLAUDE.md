@@ -259,6 +259,15 @@ default unchanged, so the bot is unaffected). `GET /analytics/lost-reasons` read
 `analytics.lead_outcome.lost_reason`. Reassignment notifies no one — HU-08 AC2
 is cut by decision (`docs/DECISIONS.md` §20).
 
+### The lead board (HU-06)
+
+`GET /leads` returns `LeadCard`s — the lead plus `client_name`, listing address,
+`operation_type`, price and `last_interaction` — from one query (a `LATERAL` on
+`idx_interaction_lead`), so a board is one round trip. Filters: `stage`,
+`agent_id`, `listing_id`, `property_id`, `client_id`, `created_from`/`created_to`
+(inclusive days in `APP_TIMEZONE`), `active`. No migration. `LeadOut` is unchanged
+for `POST /leads` and `GET /leads/{id}`, so the bot is unaffected.
+
 ### Local one-command dev
 
 `docker compose --profile local up --build` — throwaway `postgres:17-alpine`,

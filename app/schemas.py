@@ -107,11 +107,21 @@ class LeadOut(ORMModel):
     updated_at: datetime
 
 
-class LeadDetail(LeadOut):
+class LastInteraction(BaseModel):
+    occurred_at: datetime
+    direction: Direction
+    type: InteractionType
+    body: str | None = None
+
+
+class LeadCard(LeadOut):
+    """A board card: the lead plus what an agent needs to recognise it at a glance."""
     client_name: str | None = None
     listing_address: str | None = None
-    asking_price: Decimal | None = None
-    operation_type: OperationType | None = None
+    neighborhood: str | None = None
+    operation_type: OperationType
+    asking_price: Decimal
+    last_interaction: LastInteraction | None = None
 
 
 class TransitionCreate(BaseModel):

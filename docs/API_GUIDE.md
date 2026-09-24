@@ -478,16 +478,28 @@ curl -s -w '\nHTTP %{http_code}\n' -H "$AUTH" -H 'Content-Type: application/json
 The lead's `agent_id` is **the listing's agent** — you don't choose it.
 
 #### `GET /leads` — the board
-All leads in your agency, newest activity first.
+One **card** per lead in your agency, newest activity first (HU-06). A card is
+the lead (`LeadOut`) plus what an agent needs at a glance, all from one query:
+
+| card field | |
+|---|---|
+| `client_name`, `listing_address`, `neighborhood` | who and what the lead is about |
+| `operation_type`, `asking_price` | `SALE` / `RENT` and the listing price |
+| `last_interaction` | newest timeline entry — `{occurred_at, direction, type, body}`, `body` cut to 140 chars — or `null` if the thread is empty. Any entry counts, including status-change notes; it shows what last happened, not the last *response* |
 
 | query | |
 |---|---|
 | `stage` | filter by `current_stage` (`INTERESTED` … `LOST`) |
 | `agent_id` | filter by owning agent |
-| `listing_id` | filter by listing |
+| `listing_id` | filter by one listing |
+| `property_id` | filter by the physical property — covers its SALE and RENT listings |
 | `client_id` | filter by client — how the bot finds a returning client's threads |
+| `created_from` / `created_to` | `YYYY-MM-DD`, both inclusive, read in the agency timezone (`America/Bogota`). **422** if `created_from` is after `created_to` |
 | `active` | `true` = the working board: hides `WON` and `LOST`. Default `false` (everything). Closed leads stay reachable with `stage=WON` / `stage=LOST` (HU-09) |
 | `limit` / `offset` | pagination |
+
+A Kanban column is `GET /leads?active=true&stage=<STAGE>`; moving a card is
+`POST /leads/{id}/transitions`.
 
 #### `GET /leads/{lead_id}`
 One lead. **404** outside your agency.
