@@ -61,6 +61,19 @@ async def test_client_filter_never_leaks_across_agencies(world, client_for):
     assert r.status_code == 200 and r.json() == []
 
 
+async def test_board_filters_never_leak_across_agencies(world, client_for):
+    """Cards carry the client's name, so the new property/date filters must be
+    scoped by the same agency join as everything else."""
+    own = client_for(world.agents[0][0])
+    await _lead_in_agency_0(own, world)
+
+    intruder = client_for(world.agents[1][0])
+    r = await intruder.get("/leads", params={
+        "property_id": str(world.listings[0].property_id), "created_from": "2000-01-01",
+    })
+    assert r.status_code == 200 and r.json() == []
+
+
 async def test_other_agency_cannot_touch_a_visit(world, client_for):
     """Every per-visit route answers 404 outside the agency (009's included)."""
     from datetime import datetime, timedelta, timezone

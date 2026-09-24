@@ -8,20 +8,23 @@ business.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException, status
-from sqlalchemy import Select, exists, func, or_, select
+from sqlalchemy import Select, exists, func, or_, select, true
 # postgresql.insert, not sqlalchemy.insert: on_conflict_do_nothing is dialect-specific.
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
+from app.config import get_settings
 from app.models import (
     Agent, AssignmentAudit, Client, FollowUpTask, Interaction, Lead,
-    LeadLostDetail, LeadStage, LeadStageTransition, Listing, LostReason,
+    LeadLostDetail, LeadStage, LeadStageTransition, Listing, LostReason, Person,
+    Property,
 )
-from app.schemas import ALLOWED_TRANSITIONS, RESPONSE_TYPES, TERMINAL_STAGES
+from app.schemas import ALLOWED_TRANSITIONS, RESPONSE_TYPES, TERMINAL_STAGES, LeadOut
 from app.services import events
 
 
@@ -137,6 +140,13 @@ async def create_or_get_lead(
     return lead, True
 
 
+_PREVIEW_CHARS = 140
+
+
+def _local_midnight(day: date) -> datetime:
+    return datetime.combine(day, time.min, tzinfo=ZoneInfo(get_settings().app_timezone))
+
+
 async def list_leads(
     session: AsyncSession,
     *,
@@ -144,12 +154,44 @@ async def list_leads(
     stage: str | None = None,
     agent_id: uuid.UUID | None = None,
     listing_id: uuid.UUID | None = None,
+    property_id: uuid.UUID | None = None,
     client_id: uuid.UUID | None = None,
+    created_from: date | None = None,
+    created_to: date | None = None,
     active: bool = False,
     limit: int = 50,
     offset: int = 0,
-) -> list[Lead]:
-    q = _agency_scope().where(Agent.agency_id == agency_id)
+) -> list[dict]:
+    """The board: one card per lead, newest activity first (HU-06).
+
+    Client, listing and last interaction come back in the same query, so a
+    board of 200 cards is one round trip, not 401. `created_from`/`created_to`
+    are calendar days in APP_TIMEZONE, both inclusive.
+    """
+    last = (
+        select(
+            Interaction.occurred_at, Interaction.direction, Interaction.type,
+            func.left(Interaction.body, _PREVIEW_CHARS).label("body"),
+        )
+        .where(Interaction.lead_id == Lead.id)
+        .order_by(Interaction.occurred_at.desc())
+        .limit(1)
+        .lateral("last_interaction")
+    )
+    q = (
+        _agency_scope()
+        .join(Client, Client.id == Lead.client_id)
+        .join(Person, Person.id == Client.person_id)
+        .join(Listing, Listing.id == Lead.listing_id)
+        .join(Property, Property.id == Listing.property_id)
+        .outerjoin(last, true())
+        .add_columns(
+            Person.full_name, Property.address, Property.neighborhood,
+            Listing.operation_type, Listing.asking_price,
+            last.c.occurred_at, last.c.direction, last.c.type, last.c.body,
+        )
+        .where(Agent.agency_id == agency_id)
+    )
     if stage:
         q = q.where(Lead.current_stage == stage)
     if active:
@@ -159,11 +201,33 @@ async def list_leads(
         q = q.where(Lead.agent_id == agent_id)
     if listing_id:
         q = q.where(Lead.listing_id == listing_id)
+    if property_id:
+        q = q.where(Listing.property_id == property_id)
     if client_id:
         # How the bot finds a returning client's threads in this agency.
         q = q.where(Lead.client_id == client_id)
+    if created_from:
+        q = q.where(Lead.created_at >= _local_midnight(created_from))
+    if created_to:
+        q = q.where(Lead.created_at < _local_midnight(created_to + timedelta(days=1)))
     q = q.order_by(Lead.updated_at.desc()).limit(limit).offset(offset)
-    return list((await session.execute(q)).scalars().all())
+
+    cards = []
+    for lead, name, address, hood, op, price, li_at, li_dir, li_type, li_body in (
+        await session.execute(q)
+    ).all():
+        cards.append({
+            **LeadOut.model_validate(lead).model_dump(),
+            "client_name": name,
+            "listing_address": address,
+            "neighborhood": hood,
+            "operation_type": op,
+            "asking_price": price,
+            "last_interaction": None if li_at is None else {
+                "occurred_at": li_at, "direction": li_dir, "type": li_type, "body": li_body,
+            },
+        })
+    return cards
 
 
 def insert_transition(

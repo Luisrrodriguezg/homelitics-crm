@@ -1,12 +1,13 @@
 """Lead board, funnel transitions, timeline, tasks, reassignment."""
 import uuid
+from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 
 from app.config import get_settings
 from app.deps import CurrentAgent, DbSession, TeamAdmin, has_scope, require_scope
 from app.schemas import (
-    TERMINAL_STAGES, InteractionCreate, InteractionOut, LeadCreate, LeadOut, Message,
+    TERMINAL_STAGES, InteractionCreate, InteractionOut, LeadCard, LeadCreate, LeadOut, Message,
     ReassignRequest, Stage, TaskCreate, TaskOut, TaskPatch, TransitionCreate,
     TransitionOut,
 )
@@ -54,13 +55,17 @@ async def create_lead(
 
 @router.get(
     "",
-    response_model=list[LeadOut],
+    response_model=list[LeadCard],
     summary="Lead board",
-    description="All leads in the caller's agency, newest activity first. Filterable "
-                "by stage, owning agent, listing and client — `client_id` is how the "
-                "bot finds a returning client's threads. `active=true` is the working "
-                "board: WON and LOST leads drop off it but stay reachable with "
-                "`stage=WON` / `stage=LOST`.",
+    description="One card per lead in the caller's agency, newest activity first: the "
+                "client's name, the property of interest and the last timeline entry. "
+                "Filterable by stage, owning agent, listing, property, client and "
+                "creation date. `client_id` is how the bot finds a returning client's "
+                "threads. `active=true` is the working board: WON and LOST leads drop "
+                "off it but stay reachable with `stage=WON` / `stage=LOST`. "
+                "`created_from`/`created_to` are inclusive calendar days in the "
+                "agency's timezone.",
+    responses={422: {"model": Message, "description": "created_from is after created_to"}},
 )
 async def list_leads(
     agent: CurrentAgent,
@@ -68,14 +73,23 @@ async def list_leads(
     stage: Stage | None = Query(None, description="Filter by current funnel stage"),
     agent_id: uuid.UUID | None = Query(None, description="Filter by owning agent"),
     listing_id: uuid.UUID | None = Query(None, description="Filter by listing"),
+    property_id: uuid.UUID | None = Query(
+        None, description="Filter by physical property (all its listings, SALE and RENT)"),
     client_id: uuid.UUID | None = Query(None, description="Filter by client"),
+    created_from: date | None = Query(None, description="Created on or after this day"),
+    created_to: date | None = Query(None, description="Created on or before this day"),
     active: bool = Query(False, description="Only open leads: hide WON and LOST"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ):
+    if created_from and created_to and created_from > created_to:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, "created_from is after created_to"
+        )
     return await svc.list_leads(
         session, agency_id=agent.agency_id, stage=stage, agent_id=agent_id,
-        listing_id=listing_id, client_id=client_id, active=active,
+        listing_id=listing_id, property_id=property_id, client_id=client_id,
+        created_from=created_from, created_to=created_to, active=active,
         limit=limit, offset=offset,
     )
 
