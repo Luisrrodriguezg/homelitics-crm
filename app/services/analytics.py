@@ -73,6 +73,31 @@ async def listing_performance(
     return [dict(r) for r in rows.mappings()]
 
 
+async def lost_reasons(
+    session: AsyncSession, *, agency_id: uuid.UUID, days: int = 90
+) -> list[dict]:
+    """HU-09 AC3: why leads were lost, over leads lost in the last `days`.
+
+    `pct` is each reason's share of the lost leads in the window, so the rows
+    sum to 100. Reasons nobody used are absent rather than zero.
+    """
+    rows = await session.execute(
+        text("""
+            select lost_reason as reason,
+                   count(*)    as leads,
+                   round(100.0 * count(*) / sum(count(*)) over (), 2) as pct
+            from analytics.lead_outcome
+            where agency_id = :agency_id
+              and lost_reason is not null
+              and lost_at >= now() - make_interval(0, 0, 0, :days)
+            group by lost_reason
+            order by leads desc, reason
+        """),
+        {"agency_id": agency_id, "days": days},
+    )
+    return [{**r, "pct": float(r["pct"])} for r in rows.mappings()]
+
+
 async def north_star(session: AsyncSession, *, agency_id: uuid.UUID) -> dict:
     """The five target metrics from the backlog, in one payload."""
     summary = (

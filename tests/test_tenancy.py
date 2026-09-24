@@ -4,7 +4,12 @@ There is no RLS behind this API — authorization is entirely service-layer
 filtering. That makes these the highest-value tests in the suite: if a filter is
 dropped, nothing else fails, and one agency starts reading another's pipeline.
 """
+import uuid
+
 import pytest
+from sqlalchemy import select
+
+from app.models import AssignmentAudit
 
 
 async def _lead_in_agency_0(c, world):
@@ -109,11 +114,12 @@ async def test_reassign_requires_team_admin(world, client_for):
     assert r.status_code == 403
 
 
-async def test_reassign_moves_lead_and_writes_audit(world, client_for):
+async def test_reassign_moves_lead_and_writes_audit(world, client_for, session):
     """The seeder's original bug: audit row written, lead left pointing at the
-    old agent. Both must change together."""
+    old agent. Both must change together (HU-08 AC3)."""
     admin = client_for(world.agents[0][0])
     lead_id = await _lead_in_agency_0(admin, world)
+    owner = world.agents[0][0]                      # the listing's agent owns the lead
     target = world.agents[0][1]
 
     r = await admin.post(f"/leads/{lead_id}/reassign", json={"to_agent_id": str(target.id)})
@@ -121,3 +127,10 @@ async def test_reassign_moves_lead_and_writes_audit(world, client_for):
     assert r.json()["agent_id"] == str(target.id)
 
     assert (await admin.get(f"/leads/{lead_id}")).json()["agent_id"] == str(target.id)
+
+    audit = (await session.execute(
+        select(AssignmentAudit).where(AssignmentAudit.lead_id == uuid.UUID(lead_id))
+    )).scalars().all()
+    assert [(a.from_agent_id, a.to_agent_id, a.reassigned_by) for a in audit] == [
+        (owner.id, target.id, owner.id),
+    ]

@@ -41,8 +41,8 @@ Target metrics (from the backlog):
   so re-running wipes and recreates. Paste into Supabase SQL Editor and Run.
   Click "Run without RLS" on the warning popup. Run `scripts/verify_db.py` first —
   if the live schema has drifted, this file will silently destroy it.
-- `migrations/` — `001_schema.sql` (the baseline) then `002`–`009` (additive,
-  idempotent). `schema-2.sql` is kept equal to 001 + … + 009 (folded in place,
+- `migrations/` — `001_schema.sql` (the baseline) then `002`–`010` (additive,
+  idempotent). `schema-2.sql` is kept equal to 001 + … + 010 (folded in place,
   not appended — diff the catalogs of both on a throwaway DB to check).
 - `render.yaml` — free Render deploy. `scripts/provision_agent_users.py` — one
   Auth login per real agent (Admin API), replaces hand-made users.
@@ -67,7 +67,8 @@ Target metrics (from the backlog):
 
 **`analytics`** — plain views only: `funnel_daily`, `agent_response_time`,
 `listing_performance`, plus `lead_outcome` and `stage_conversion` (added in
-`002_fixes.sql` for the North Star metrics). Dashboards read from here
+`002_fixes.sql` for the North Star metrics; `010` appends `lead_outcome.lost_reason`
+for HU-09). Dashboards read from here
 exclusively, never from `core` — which is why **every** one of the five exposes
 `agency_id`; two of them did not until `002_fixes.sql`.
 
@@ -250,10 +251,18 @@ never PII.
 - **The bot is reactive:** nothing is pushed to clients; it reads the state when
   the client writes. `docs/API_GUIDE.md` §6.10 is the bot's scheduling script.
 
+### Lost leads and reassignment (010, HU-09 / HU-08)
+
+A LOST transition writes `lead_lost_detail` **and** a `Lost: <reason>` STATUS_CHANGE
+timeline line. `GET /leads?active=true` is the working board (hides WON and LOST;
+default unchanged, so the bot is unaffected). `GET /analytics/lost-reasons` reads
+`analytics.lead_outcome.lost_reason`. Reassignment notifies no one — HU-08 AC2
+is cut by decision (`docs/DECISIONS.md` §20).
+
 ### Local one-command dev
 
 `docker compose --profile local up --build` — throwaway `postgres:17-alpine`,
-`migrations/*.sql` auto-applied on first boot (001→009), one-shot `seed`
+`migrations/*.sql` auto-applied on first boot (001→010), one-shot `seed`
 (`--scale small --seed 42`), API with `DEV_AUTH_BYPASS=true` (identity from
 `X-Dev-Agent-Id`; the app refuses to start with the bypass on against a
 non-local DB). No `.env`, no Supabase.
@@ -271,8 +280,8 @@ default Mon–Fri availability for the 48 agents) — the exact SQL is in the
 session's `phase0_cleanup.sql`; `scripts/purge_test_rows.sql` is the reusable part.
 `tests/conftest.py` now refuses a non-local `DATABASE_URL` so debris cannot recur.
 
-Migrations `001`–`009` are applied to the live DB; `scripts/verify_db.py` is green
-(35/35). `007` went on 2026-09-10 via the Supabase connector's `apply_migration`;
+Migrations `001`–`010` are applied to the live DB; `scripts/verify_db.py` is green
+(36/36). `007` went on 2026-09-10 via the Supabase connector's `apply_migration`;
 its new response definition moved 96 leads to `never_answered` (the 72h sweep's
 auto-note had been counting as their first response). Ground truth held: slow
 28.8h vs fast 2.0h.
@@ -286,6 +295,9 @@ pre-flight held (zero leads with two open visits, zero duplicate feedback per
 side, zero funnel mismatches), so both UNIQUE indexes built and no funnel row
 changed; `visits:feedback` was granted to `ai-agent`. `verify_db.py` 35/35,
 ground truth unchanged.
+`010` went on 2026-09-24 the same way, before its code merged: `lead_outcome`
+gained `lost_reason`; the pre-existing 15 columns hash identically before and
+after (9,407 rows), all 8,502 LOST leads carry a reason. `verify_db.py` 36/36.
 Worktrees have no `.env`; scripts use the main checkout's
 `/Users/luisrro/Desktop/Proyecto Home/.env`.
 

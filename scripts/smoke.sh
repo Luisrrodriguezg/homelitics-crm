@@ -117,7 +117,7 @@ req POST "/leads/${LEAD}/transitions" 409 '{"to_stage":"VISITED"}'
 
 echo
 echo "analytics"
-for ep in funnel-daily agent-response-time listing-performance north-star; do
+for ep in funnel-daily agent-response-time listing-performance lost-reasons north-star; do
   req GET "/analytics/${ep}" 200
 done
 

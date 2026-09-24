@@ -26,6 +26,10 @@ ListingStatus = Literal["ACTIVE", "PAUSED", "CLOSED"]
 SubmittedBy = Literal["AGENT", "CLIENT"]
 TimeOffSource = Literal["MANUAL", "ICS"]
 CalendarEventKind = Literal["VISIT", "TIME_OFF", "AVAILABILITY"]
+# core.lost_reason codes.
+LostReasonCode = Literal[
+    "PRICE", "LOCATION", "BOUGHT_ELSEWHERE", "NO_RESPONSE", "FINANCING", "OTHER"
+]
 
 TERMINAL_STAGES: frozenset[str] = frozenset({"WON", "LOST"})
 
@@ -114,9 +118,7 @@ class TransitionCreate(BaseModel):
     to_stage: Stage
     # Required when to_stage is LOST. The schema cannot express this, so the
     # service writes lead_lost_detail in the same transaction.
-    lost_reason: Literal[
-        "PRICE", "LOCATION", "BOUGHT_ELSEWHERE", "NO_RESPONSE", "FINANCING", "OTHER"
-    ] | None = None
+    lost_reason: LostReasonCode | None = None
     note: str | None = Field(default=None, max_length=2000)
 
     @model_validator(mode="after")
@@ -442,6 +444,12 @@ class ListingPerformanceOut(BaseModel):
     leads: int
     visits: int
     won: int
+
+
+class LostReasonOut(BaseModel):
+    reason: LostReasonCode
+    leads: int
+    pct: float
 
 
 class NorthStarOut(BaseModel):

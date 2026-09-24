@@ -145,12 +145,16 @@ async def list_leads(
     agent_id: uuid.UUID | None = None,
     listing_id: uuid.UUID | None = None,
     client_id: uuid.UUID | None = None,
+    active: bool = False,
     limit: int = 50,
     offset: int = 0,
 ) -> list[Lead]:
     q = _agency_scope().where(Agent.agency_id == agency_id)
     if stage:
         q = q.where(Lead.current_stage == stage)
+    if active:
+        # HU-09 AC2: a closed lead leaves the working board, never the table.
+        q = q.where(Lead.current_stage.not_in(TERMINAL_STAGES))
     if agent_id:
         q = q.where(Lead.agent_id == agent_id)
     if listing_id:
@@ -241,11 +245,17 @@ async def add_transition(
             LeadLostDetail(lead_id=lead_id, lost_reason_id=reason_id, free_text=note)
         )
 
-    if note:
+    # LOST always gets a timeline line, so the reason stays readable in the
+    # lead's history (HU-09 AC2); other stages only when there is a note.
+    # STATUS_CHANGE is never a response, so neither stops the response clock.
+    body = note
+    if to_stage == "LOST":
+        body = f"Lost: {lost_reason}" + (f" — {note}" if note else "")
+    if body:
         session.add(
             Interaction(
                 lead_id=lead_id, direction="OUTBOUND", channel="IN_APP",
-                type="STATUS_CHANGE", body=note, created_by=agent.id,
+                type="STATUS_CHANGE", body=body, created_by=agent.id,
             )
         )
 
