@@ -393,7 +393,8 @@ join core.agent ag    on ag.id = li.agent_id;
 -- views above expose: time to first response, whether a follow-up exists,
 -- whether the lead reached a visit, and whether it died inside 48h. Plus
 -- (010) why it died: lead_lost_detail is keyed on lead_id, so the join
--- never adds rows.
+-- never adds rows. Plus (011) the property, the operation type and one
+-- "reached" flag per funnel stage, for the filtered funnel dashboard.
 create view analytics.lead_outcome as
 select l.id            as lead_id,
        ag.agency_id,
@@ -413,10 +414,16 @@ select l.id            as lead_id,
        lt.lost_at,
        (lt.lost_at is not null
         and lt.lost_at - l.created_at <= interval '48 hours')      as lost_within_48h,
-       lr.code                                                     as lost_reason
+       lr.code                                                     as lost_reason,
+       li.property_id,
+       li.operation_type,
+       coalesce(st.reached_visit_scheduled, false)                 as reached_visit_scheduled,
+       coalesce(st.reached_negotiating, false)                     as reached_negotiating,
+       coalesce(st.reached_won, false)                             as reached_won
 from core.lead l
 join core.agent ag      on ag.id = l.agent_id
 join core.lead_stage ls on ls.code = l.current_stage
+join core.listing li    on li.id = l.listing_id
 left join lateral (
   select min(i.occurred_at) as first_outbound
   from core.interaction i
@@ -430,6 +437,13 @@ left join lateral (
   from core.lead_stage_transition t
   where t.lead_id = l.id and t.to_stage = 'LOST'
 ) lt on true
+left join lateral (
+  select bool_or(t.to_stage = 'VISIT_SCHEDULED') as reached_visit_scheduled,
+         bool_or(t.to_stage = 'NEGOTIATING')     as reached_negotiating,
+         bool_or(t.to_stage = 'WON')             as reached_won
+  from core.lead_stage_transition t
+  where t.lead_id = l.id
+) st on true
 left join core.lead_lost_detail lld on lld.lead_id = l.id
 left join core.lost_reason lr       on lr.id = lld.lost_reason_id;
 

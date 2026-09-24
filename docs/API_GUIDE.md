@@ -882,6 +882,29 @@ Transition counts per day and target stage. `days` 1–730, default 90.
 Views, leads, visits, wins per listing, ordered by views. On seeded data the
 overpriced cohort shows high views with a low win rate.
 
+#### `GET /analytics/funnel` — the filtered funnel (HU-17)
+**TEAM_ADMIN only** (403 otherwise). Of the leads *created* in the window, how many
+ever reached each stage — the same "reached" as `stage_conversion`, so unfiltered it
+matches `/analytics/north-star`. The biggest drop in `pct_from_prev` is where clients
+are lost. Reads `analytics.lead_outcome` (migration `011`).
+
+| query | |
+|---|---|
+| `created_from` / `created_to` | `YYYY-MM-DD`, inclusive, agency timezone; **422** if backwards |
+| `agent_id`, `listing_id`, `property_id` | owning agent, one listing, or a property (its SALE and RENT listings) |
+| `operation_type` | `SALE` or `RENT` |
+| `format` | `json` (default) or `csv` (a `funnel.csv` download; PDF is the frontend's job) |
+
+```json
+{"stages": [
+   {"stage": "INTERESTED",      "leads_reached": 779, "pct_from_prev": null,  "pct_of_first": 100.0},
+   {"stage": "VISIT_SCHEDULED", "leads_reached": 254, "pct_from_prev": 32.61, "pct_of_first": 32.6},
+   {"stage": "VISITED",         "leads_reached": 192, "pct_from_prev": 75.59, "pct_of_first": 24.65}
+ ],
+ "lost": 708,
+ "filters": {"operation_type": "RENT"}}
+```
+
 #### `GET /analytics/lost-reasons?days=90`
 Why leads were lost (HU-09): leads lost in the last `days` (1–730, default 90,
 counted on the loss date), grouped by the reason given when they moved to `LOST`,

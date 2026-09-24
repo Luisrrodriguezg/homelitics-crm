@@ -1,12 +1,16 @@
 """Analytics endpoints. Every one reads the analytics schema only."""
+import csv
+import io
 import uuid
+from datetime import date
+from typing import Literal
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query, Response, status
 
-from app.deps import CurrentAgent, DbSession
+from app.deps import CurrentAgent, DbSession, TeamAdmin
 from app.schemas import (
-    AgentResponseTimeOut, FunnelDailyOut, ListingPerformanceOut, LostReasonOut,
-    NorthStarOut,
+    AgentResponseTimeOut, FunnelDailyOut, FunnelOut, ListingPerformanceOut,
+    LostReasonOut, Message, NorthStarOut, OperationType,
 )
 from app.services import analytics as svc
 
@@ -83,3 +87,59 @@ async def lost_reasons(
 )
 async def north_star(agent: CurrentAgent, session: DbSession):
     return await svc.north_star(session, agency_id=agent.agency_id)
+
+
+@router.get(
+    "/funnel",
+    response_model=FunnelOut,
+    summary="Aggregated funnel, filterable and exportable",
+    description="HU-17. Of the leads created in the window, how many ever reached "
+                "each stage (INTERESTED → VISIT_SCHEDULED → VISITED → NEGOTIATING → "
+                "WON), with the conversion from the previous stage and from the "
+                "first, plus how many were lost. The biggest drop in `pct_from_prev` "
+                "is where clients are lost. Filter by creation day (inclusive, "
+                "agency timezone), agent, listing, property and sale/rent. "
+                "`format=csv` downloads the same rows; PDF is the frontend's job. "
+                "Team administrators only.",
+    responses={
+        200: {"content": {"text/csv": {}}, "description": "JSON, or CSV with format=csv"},
+        403: {"model": Message, "description": "Not a TEAM_ADMIN"},
+        422: {"model": Message, "description": "created_from is after created_to"},
+    },
+)
+async def funnel(
+    agent: TeamAdmin,
+    session: DbSession,
+    created_from: date | None = Query(None, description="Leads created on or after this day"),
+    created_to: date | None = Query(None, description="Leads created on or before this day"),
+    agent_id: uuid.UUID | None = Query(None, description="Filter by owning agent"),
+    listing_id: uuid.UUID | None = Query(None, description="Filter by listing"),
+    property_id: uuid.UUID | None = Query(None, description="Filter by property (SALE and RENT listings)"),
+    operation_type: OperationType | None = Query(None, description="SALE or RENT"),
+    format: Literal["json", "csv"] = Query("json"),
+):
+    if created_from and created_to and created_from > created_to:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, "created_from is after created_to"
+        )
+    result = await svc.funnel(
+        session, agency_id=agent.agency_id, created_from=created_from,
+        created_to=created_to, agent_id=agent_id, listing_id=listing_id,
+        property_id=property_id, operation_type=operation_type,
+    )
+    if format == "json":
+        return result
+
+    out = io.StringIO()
+    writer = csv.writer(out)
+    writer.writerow(["stage", "leads_reached", "pct_from_prev", "pct_of_first"])
+    for row in result["stages"]:
+        writer.writerow([row["stage"], row["leads_reached"],
+                         row["pct_from_prev"], row["pct_of_first"]])
+    first = result["stages"][0]["leads_reached"]
+    writer.writerow(["LOST", result["lost"], "",
+                     round(100.0 * result["lost"] / first, 2) if first else ""])
+    return Response(
+        out.getvalue(), media_type="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="funnel.csv"'},
+    )

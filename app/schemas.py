@@ -462,6 +462,19 @@ class LostReasonOut(BaseModel):
     pct: float
 
 
+class FunnelStageOut(BaseModel):
+    stage: Stage
+    leads_reached: int
+    pct_from_prev: float | None
+    pct_of_first: float | None
+
+
+class FunnelOut(BaseModel):
+    stages: list[FunnelStageOut]
+    lost: int
+    filters: dict[str, str]
+
+
 class NorthStarOut(BaseModel):
     """The five metrics the whole schema exists to make measurable."""
     leads: int
