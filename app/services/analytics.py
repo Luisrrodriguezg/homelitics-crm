@@ -10,9 +10,13 @@ them buys nothing.
 from __future__ import annotations
 
 import uuid
+from datetime import date, timedelta
+from decimal import ROUND_HALF_UP, Decimal
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.services.lead import _local_midnight
 
 
 async def funnel_daily(
@@ -96,6 +100,86 @@ async def lost_reasons(
         {"agency_id": agency_id, "days": days},
     )
     return [{**r, "pct": float(r["pct"])} for r in rows.mappings()]
+
+
+FUNNEL_STAGES = ("INTERESTED", "VISIT_SCHEDULED", "VISITED", "NEGOTIATING", "WON")
+
+
+async def funnel(
+    session: AsyncSession,
+    *,
+    agency_id: uuid.UUID,
+    created_from: date | None = None,
+    created_to: date | None = None,
+    agent_id: uuid.UUID | None = None,
+    listing_id: uuid.UUID | None = None,
+    property_id: uuid.UUID | None = None,
+    operation_type: str | None = None,
+) -> dict:
+    """HU-17: the funnel of the leads *created* in the window, filtered.
+
+    A cohort, not a flow: it counts how many of those leads ever reached each
+    stage, the same "reached" the stage_conversion view uses, so the unfiltered
+    numbers match /analytics/north-star. Only the WHERE fragments below are
+    text; every value is a bound parameter.
+    """
+    where, params = ["agency_id = :agency_id"], {"agency_id": agency_id}
+    if created_from:
+        where.append("created_at >= :created_from")
+        params["created_from"] = _local_midnight(created_from)
+    if created_to:
+        where.append("created_at < :created_to")
+        params["created_to"] = _local_midnight(created_to + timedelta(days=1))
+    for column, value in (
+        ("agent_id", agent_id), ("listing_id", listing_id),
+        ("property_id", property_id), ("operation_type", operation_type),
+    ):
+        if value is not None:
+            where.append(f"{column} = :{column}")
+            params[column] = value
+
+    row = (
+        await session.execute(
+            text(f"""
+                select count(*)                                          as interested,
+                       count(*) filter (where reached_visit_scheduled)   as visit_scheduled,
+                       count(*) filter (where reached_visit)             as visited,
+                       count(*) filter (where reached_negotiating)       as negotiating,
+                       count(*) filter (where reached_won)               as won,
+                       count(*) filter (where lost_at is not null)       as lost
+                from analytics.lead_outcome
+                where {" and ".join(where)}
+            """),
+            params,
+        )
+    ).mappings().one()
+
+    def pct(n: int, of: int | None) -> float | None:
+        # Half-up like Postgres round(), so it agrees with stage_conversion.
+        if not of:
+            return None
+        return float((Decimal(100 * n) / of).quantize(Decimal("0.01"), ROUND_HALF_UP))
+
+    counts = [row[stage.lower()] for stage in FUNNEL_STAGES]
+    return {
+        "stages": [
+            {
+                "stage": stage,
+                "leads_reached": n,
+                "pct_from_prev": pct(n, counts[i - 1]) if i else None,
+                "pct_of_first": pct(n, counts[0]),
+            }
+            for i, (stage, n) in enumerate(zip(FUNNEL_STAGES, counts))
+        ],
+        "lost": row["lost"],
+        "filters": {
+            k: str(v) for k, v in (
+                ("created_from", created_from), ("created_to", created_to),
+                ("agent_id", agent_id), ("listing_id", listing_id),
+                ("property_id", property_id), ("operation_type", operation_type),
+            ) if v is not None
+        },
+    }
 
 
 async def north_star(session: AsyncSession, *, agency_id: uuid.UUID) -> dict:
