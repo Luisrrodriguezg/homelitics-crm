@@ -5,7 +5,8 @@ from fastapi import APIRouter, Query
 
 from app.deps import CurrentAgent, DbSession
 from app.schemas import (
-    AgentResponseTimeOut, FunnelDailyOut, ListingPerformanceOut, NorthStarOut,
+    AgentResponseTimeOut, FunnelDailyOut, ListingPerformanceOut, LostReasonOut,
+    NorthStarOut,
 )
 from app.services import analytics as svc
 
@@ -54,6 +55,22 @@ async def listing_performance(
     return await svc.listing_performance(
         session, agency_id=agent.agency_id, limit=limit, offset=offset
     )
+
+
+@router.get(
+    "/lost-reasons",
+    response_model=list[LostReasonOut],
+    summary="Why leads were lost",
+    description="Leads lost in the look-back window, grouped by the reason recorded "
+                "when they moved to LOST, most common first. `pct` is the share of "
+                "those lost leads, so the rows sum to 100.",
+)
+async def lost_reasons(
+    agent: CurrentAgent,
+    session: DbSession,
+    days: int = Query(90, ge=1, le=730, description="Look-back window in days, on the loss date"),
+):
+    return await svc.lost_reasons(session, agency_id=agent.agency_id, days=days)
 
 
 @router.get(

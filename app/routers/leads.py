@@ -58,7 +58,9 @@ async def create_lead(
     summary="Lead board",
     description="All leads in the caller's agency, newest activity first. Filterable "
                 "by stage, owning agent, listing and client — `client_id` is how the "
-                "bot finds a returning client's threads.",
+                "bot finds a returning client's threads. `active=true` is the working "
+                "board: WON and LOST leads drop off it but stay reachable with "
+                "`stage=WON` / `stage=LOST`.",
 )
 async def list_leads(
     agent: CurrentAgent,
@@ -67,12 +69,14 @@ async def list_leads(
     agent_id: uuid.UUID | None = Query(None, description="Filter by owning agent"),
     listing_id: uuid.UUID | None = Query(None, description="Filter by listing"),
     client_id: uuid.UUID | None = Query(None, description="Filter by client"),
+    active: bool = Query(False, description="Only open leads: hide WON and LOST"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ):
     return await svc.list_leads(
         session, agency_id=agent.agency_id, stage=stage, agent_id=agent_id,
-        listing_id=listing_id, client_id=client_id, limit=limit, offset=offset,
+        listing_id=listing_id, client_id=client_id, active=active,
+        limit=limit, offset=offset,
     )
 
 

@@ -365,7 +365,7 @@ Walks the whole funnel end to end and asserts the interesting statuses: the same
 lead twice (201 then 200, same id), the same visit twice (201 then 200), another
 client's overlapping visit (409), the calendar views and the `.ics` feed fetched
 with no auth header, confirming/completing moving the lead's stage, an illegal
-stage skip (409), and all four analytics endpoints.
+stage skip (409), and all five analytics endpoints.
 
 ---
 
@@ -389,7 +389,7 @@ docker compose --profile local up --build
 ```
 
 Brings up a throwaway `postgres:17-alpine`, applies `migrations/*.sql` on first
-boot (001 → 009 in filename order — `004`'s Realtime block no-ops without an
+boot (001 → 010 in filename order — `004`'s Realtime block no-ops without an
 `auth` schema), runs a one-shot seed (`--scale small --seed 42`), then starts the
 API on `:8000` with `DEV_AUTH_BYPASS=true`. Send `X-Dev-Agent-Id: <core.agent
 uuid>` instead of a bearer token. The API refuses to start if the bypass is on

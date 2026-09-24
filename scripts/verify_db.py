@@ -209,6 +209,15 @@ def verify_structure(cur):
     check("every service account holds visits:feedback (009)", ungranted == 0,
           f"{ungranted} account(s) without it" if ungranted else "")
 
+    # 010: GET /analytics/lost-reasons reads this column; without it that one
+    # endpoint 500s (nothing else selects it).
+    has_lost_reason = one(cur, """select count(*) from information_schema.columns
+                                  where table_schema = 'analytics'
+                                    and table_name = 'lead_outcome'
+                                    and column_name = 'lost_reason'""")
+    check("analytics.lead_outcome exposes lost_reason (010)", has_lost_reason == 1,
+          "" if has_lost_reason else "apply migrations/010_lost_reason_analytics.sql")
+
     # The reason running without RLS is safe: PostgREST simply cannot reach these
     # schemas. The ONE deliberate exception (004_events_outbox.sql) is a SELECT on
     # events.domain_event for `authenticated`, so Realtime can stream it — and that

@@ -543,3 +543,27 @@ with the old agent when a lead is reassigned — unchanged.
 `appointment.*` events — the data is already in the outbox), or if agents need
 visits written into their Google Calendar as real events (that direction needs
 OAuth).
+
+---
+
+## 20. Lost reasons live on `lead_outcome`; reassignment notifies no one (010_lost_reason_analytics.sql)
+
+**Decision (HU-09).** The reason a lead was lost reaches analytics as one more
+column on `analytics.lead_outcome`, not a sixth view. That view is already one
+row per lead and already carries `lost_at`; `lead_lost_detail` is keyed on
+`lead_id`, so the join cannot add rows and no North Star metric moves.
+`GET /analytics/lost-reasons` groups on it. "Moves out of the active board" is
+`GET /leads?active=true` (hides WON and LOST) rather than a changed default, so
+the bot's `?client_id=` lookup is untouched. The reason stays in the lead's
+history as a `Lost: <reason>` STATUS_CHANGE timeline line, written with the
+transition — STATUS_CHANGE is never a response, so the clock is unaffected.
+
+**Decision (HU-08 AC2, decided with Luis).** A reassigned agent is **not
+notified**. No event, no push, no auto-task: the lead appears on their board and
+`assignment_audit` records who moved it and when. Same reasoning as §19's
+reminders — nothing today would deliver a notification.
+
+**Revisit if** the frontend needs a live "assigned to you" toast: emit
+`lead.reassigned` from `services/lead.reassign` (the outbox is already on the
+Realtime publication), no migration needed. Open follow-up tasks also stay with
+the old agent on reassignment — move them in the same change if it matters.

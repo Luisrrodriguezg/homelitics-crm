@@ -486,6 +486,7 @@ All leads in your agency, newest activity first.
 | `agent_id` | filter by owning agent |
 | `listing_id` | filter by listing |
 | `client_id` | filter by client — how the bot finds a returning client's threads |
+| `active` | `true` = the working board: hides `WON` and `LOST`. Default `false` (everything). Closed leads stay reachable with `stage=WON` / `stage=LOST` (HU-09) |
 | `limit` / `offset` | pagination |
 
 #### `GET /leads/{lead_id}`
@@ -539,7 +540,10 @@ Errors:
 - **422** — `LOST` without `lost_reason`, `lost_reason` on a non-`LOST` move, or an unknown reason code
 
 Moving to `LOST` also writes a `lead_lost_detail` row in the **same transaction** —
-either both land or neither does.
+either both land or neither does — and always adds a `STATUS_CHANGE` line to the
+timeline, `Lost: <reason>` (plus ` — <note>` when a note was sent), so the reason
+stays readable in the lead's history. Other stages add that line only when a
+`note` is sent. `STATUS_CHANGE` never counts as an agent response.
 
 ```json
 {
@@ -620,7 +624,11 @@ transaction (doing only one was the seeder's original bug).
 
 - **403** — caller is not a `TEAM_ADMIN`
 - **404** — target agent is not an active agent in your agency
-- **409** — target is deactivated, or already owns the lead
+- **409** — target is deactivated, already owns the lead, or is an AI agent
+
+The new owner is **not notified** — no event, no push (HU-08 AC2 is cut by
+decision, `docs/DECISIONS.md` §20). The lead simply appears on their board
+(`GET /leads?agent_id=`); the history is `assignment_audit`.
 
 ---
 
@@ -861,6 +869,21 @@ Transition counts per day and target stage. `days` 1–730, default 90.
 #### `GET /analytics/listing-performance?limit=&offset=`
 Views, leads, visits, wins per listing, ordered by views. On seeded data the
 overpriced cohort shows high views with a low win rate.
+
+#### `GET /analytics/lost-reasons?days=90`
+Why leads were lost (HU-09): leads lost in the last `days` (1–730, default 90,
+counted on the loss date), grouped by the reason given when they moved to `LOST`,
+most common first. `pct` is the share of those lost leads, so the rows sum to
+100; a reason nobody used is absent, not zero. Reads `analytics.lead_outcome.lost_reason`
+(migration `010`).
+
+```json
+[
+  {"reason": "PRICE",            "leads": 49, "pct": 23.11},
+  {"reason": "NO_RESPONSE",      "leads": 43, "pct": 20.28},
+  {"reason": "BOUGHT_ELSEWHERE", "leads": 33, "pct": 15.57}
+]
+```
 
 ---
 

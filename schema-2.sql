@@ -391,7 +391,9 @@ join core.agent ag    on ag.id = li.agent_id;
 
 -- One row per lead, carrying the four North Star facts that none of the
 -- views above expose: time to first response, whether a follow-up exists,
--- whether the lead reached a visit, and whether it died inside 48h.
+-- whether the lead reached a visit, and whether it died inside 48h. Plus
+-- (010) why it died: lead_lost_detail is keyed on lead_id, so the join
+-- never adds rows.
 create view analytics.lead_outcome as
 select l.id            as lead_id,
        ag.agency_id,
@@ -410,7 +412,8 @@ select l.id            as lead_id,
                where f.lead_id = l.id)                            as has_follow_up,
        lt.lost_at,
        (lt.lost_at is not null
-        and lt.lost_at - l.created_at <= interval '48 hours')      as lost_within_48h
+        and lt.lost_at - l.created_at <= interval '48 hours')      as lost_within_48h,
+       lr.code                                                     as lost_reason
 from core.lead l
 join core.agent ag      on ag.id = l.agent_id
 join core.lead_stage ls on ls.code = l.current_stage
@@ -426,7 +429,9 @@ left join lateral (
   select min(t.changed_at) as lost_at
   from core.lead_stage_transition t
   where t.lead_id = l.id and t.to_stage = 'LOST'
-) lt on true;
+) lt on true
+left join core.lead_lost_detail lld on lld.lead_id = l.id
+left join core.lost_reason lr       on lr.id = lld.lost_reason_id;
 
 -- Stage-to-stage conversion. DISTINCT leads that ever reached each stage, so a
 -- lead bouncing back and forth counts once. LOST (sort_order 6) is off-funnel:

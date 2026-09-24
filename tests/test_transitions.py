@@ -71,3 +71,45 @@ async def test_lost_reason_is_only_valid_on_lost(world, client_for):
     r = await c.post(f"/leads/{lead}/transitions",
                json={"to_stage": "VISIT_SCHEDULED", "lost_reason": "PRICE"})
     assert r.status_code == 422
+
+
+async def _lose(c, lead, reason, note=None):
+    body = {"to_stage": "LOST", "lost_reason": reason}
+    if note:
+        body["note"] = note
+    r = await c.post(f"/leads/{lead}/transitions", json=body)
+    assert r.status_code == 201, r.text
+
+
+async def test_active_board_hides_closed_leads(world, client_for):
+    """HU-09 AC2: WON and LOST leave the working board but stay in history."""
+    c = client_for(world.agents[0][0])
+    lost = await _lead(c, world, client_idx=0)
+    won = await _lead(c, world, client_idx=1)
+    await _lose(c, lost, "PRICE")
+    for stage in ("VISIT_SCHEDULED", "VISITED", "NEGOTIATING", "WON"):
+        await c.post(f"/leads/{won}/transitions", json={"to_stage": stage})
+
+    everything = {row["id"] for row in (await c.get("/leads")).json()}
+    assert {lost, won} <= everything
+
+    active = {row["id"] for row in (await c.get("/leads", params={"active": "true"})).json()}
+    assert lost not in active and won not in active
+
+    history = (await c.get("/leads", params={"stage": "LOST"})).json()
+    assert lost in {row["id"] for row in history}
+
+
+@pytest.mark.parametrize("note, expected", [
+    (None, "Lost: BOUGHT_ELSEWHERE"),
+    ("went with another agency", "Lost: BOUGHT_ELSEWHERE — went with another agency"),
+])
+async def test_lost_reason_is_on_the_timeline(world, client_for, note, expected):
+    """HU-09 AC2: the reason stays readable in the lead's history."""
+    c = client_for(world.agents[0][0])
+    lead = await _lead(c, world)
+    await _lose(c, lead, "BOUGHT_ELSEWHERE", note)
+
+    lines = [i for i in (await c.get(f"/leads/{lead}/interactions")).json()
+             if i["type"] == "STATUS_CHANGE"]
+    assert [i["body"] for i in lines] == [expected]
