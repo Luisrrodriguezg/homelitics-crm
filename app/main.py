@@ -18,7 +18,7 @@ from app.config import get_settings
 from app.db import dispose_engine
 from app.jobs import build_scheduler
 from app.routers import (
-    analytics, appointments, availability, calendar, clients, health, leads, listings,
+    agents, analytics, appointments, availability, calendar, clients, health, leads, listings,
 )
 
 settings = get_settings()
@@ -117,6 +117,7 @@ async def database_error_handler(request: Request, exc: SQLAlchemyError):
 
 
 app.include_router(health.router)
+app.include_router(agents.router)
 app.include_router(clients.router)
 app.include_router(leads.router)
 app.include_router(appointments.lead_router)
