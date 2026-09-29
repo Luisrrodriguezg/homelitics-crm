@@ -625,6 +625,15 @@ on that lead.
 
 ### 6.6 Reassignment — `TEAM_ADMIN` only
 
+#### `GET /agents` — who can I reassign to
+```bash
+curl -s -H "$AUTH" "$BASE/agents?active=true"
+```
+The caller's agency, oldest first: `id`, `agency_id`, `role`, `active`, `full_name` (no contact
+details). AI agents are omitted unless `include_bots=true`. Filters: `active`, `role`,
+`agency_id` (must equal your own agency, otherwise **404** — it never widens tenancy),
+`limit` (≤ 200), `offset`. Any authenticated agent may call it. Use `id` as `to_agent_id` below.
+
 #### `POST /leads/{lead_id}/reassign`
 ```bash
 curl -s -H "$AUTH" -H 'Content-Type: application/json' \

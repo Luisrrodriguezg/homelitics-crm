@@ -66,6 +66,15 @@ class AgentOut(ORMModel):
     email: str | None = None
 
 
+class AgentListItem(ORMModel):
+    """Directory entry: enough to pick a reassignment target, no contact details."""
+    id: uuid.UUID
+    agency_id: uuid.UUID
+    role: Literal["AGENT", "TEAM_ADMIN", "AI_AGENT"]
+    active: bool
+    full_name: str | None = None
+
+
 # ------------------------------------------------------------------- client
 
 class ClientCreate(BaseModel):
