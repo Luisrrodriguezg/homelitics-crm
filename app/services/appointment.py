@@ -225,6 +225,7 @@ def _record(
         aggregate_type="appointment",
         aggregate_id=appointment.id,
         agency_id=agency_id,
+        actor_id=actor.id,
         payload={
             "lead_id": str(appointment.lead_id),
             "agent_id": str(appointment.agent_id),

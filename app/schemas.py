@@ -75,6 +75,63 @@ class AgentListItem(ORMModel):
     full_name: str | None = None
 
 
+# ------------------------------------------------------------------- invite
+
+InviteRole = Literal["AGENT", "TEAM_ADMIN"]
+InviteStatus = Literal["PENDING", "REDEEMED", "REVOKED", "EXPIRED"]
+# Shape only; Supabase Auth has the final say on what an address is.
+_EMAIL = r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
+
+
+class InviteCreate(BaseModel):
+    role: InviteRole = "AGENT"
+    # Optional lock: only this address may redeem the invite.
+    email: str | None = Field(default=None, max_length=320, pattern=_EMAIL)
+    # Defaults to INVITE_TTL_HOURS. At most a week: the token is a bearer secret.
+    expires_in_hours: int | None = Field(default=None, ge=1, le=168)
+
+
+class InviteOut(ORMModel):
+    """An invite as its agency's admins see it. Never carries the token."""
+    id: uuid.UUID
+    role: InviteRole
+    email: str | None
+    status: InviteStatus
+    created_by: uuid.UUID
+    created_at: datetime
+    expires_at: datetime
+    redeemed_at: datetime | None
+    redeemed_agent_id: uuid.UUID | None
+
+
+class InviteCreated(InviteOut):
+    """The one response that carries the token. It is not stored, so it cannot
+    be shown again: a lost token means revoke and issue a new invite."""
+    token: str
+    # <FRONTEND_URL>/invite#<token>, or null when FRONTEND_URL is unset. The
+    # token sits in the fragment, which browsers never send to a server.
+    invite_url: str | None
+
+
+class InviteToken(BaseModel):
+    token: str = Field(min_length=20, max_length=200)
+
+
+class InvitePreview(BaseModel):
+    """What the sign-up page shows before the person types anything."""
+    agency_name: str
+    role: InviteRole
+    email: str | None
+    expires_at: datetime
+
+
+class InviteAccept(InviteToken):
+    full_name: str = Field(min_length=1, max_length=200)
+    email: str = Field(max_length=320, pattern=_EMAIL)
+    password: str = Field(min_length=8, max_length=72)
+    phone: str | None = Field(default=None, max_length=40)
+
+
 # ------------------------------------------------------------------- client
 
 class ClientCreate(BaseModel):

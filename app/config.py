@@ -61,16 +61,26 @@ class Settings(BaseSettings):
         alias="CALENDAR_IMPORT_HOSTS",
     )
 
+    # --- agent invites (012) ---
+    # Lets POST /invites/accept create the Supabase Auth user. The one place the
+    # API holds this key (docs/DECISIONS.md §21); unset -> accept answers 503.
+    supabase_service_role_key: str | None = Field(default=None, alias="SUPABASE_SERVICE_ROLE_KEY")
+    # The frontend's base URL; invite links are <FRONTEND_URL>/invite#<token>.
+    # Unset -> the admin gets the bare token and builds the link themselves.
+    frontend_url: str | None = Field(default=None, alias="FRONTEND_URL")
+    invite_ttl_hours: int = Field(default=72, alias="INVITE_TTL_HOURS")
+
     # --- local dev only ---
     # Skip Supabase JWT entirely and take the acting agent from X-Dev-Agent-Id.
     # Guarded in __init__: refused unless DATABASE_URL points at localhost/db.
     dev_auth_bypass: bool = Field(default=False, alias="DEV_AUTH_BYPASS")
 
-    @field_validator("supabase_jwt_secret", "public_base_url", mode="before")
+    @field_validator("supabase_jwt_secret", "public_base_url", "supabase_service_role_key",
+                     "frontend_url", mode="before")
     @classmethod
     def _blank_is_none(cls, v):
         # An empty SUPABASE_JWT_SECRET= line in .env must mean "use JWKS",
-        # not "the secret is the empty string". Same for PUBLIC_BASE_URL=.
+        # not "the secret is the empty string". Same for the other optionals.
         return v or None
 
     @field_validator("database_url")

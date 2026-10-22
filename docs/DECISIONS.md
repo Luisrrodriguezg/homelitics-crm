@@ -318,8 +318,8 @@ skipped and an existing email is looked up in `auth.users` over the direct
 connection instead of paged through the admin list.
 
 The service-role key bypasses RLS and creates users. It belongs in `.env` on the
-machine that runs the script and nowhere else — never in a frontend, never in
-Render's env vars (the API does not need it).
+machine that runs the script and nowhere else — never in a frontend. *(Amended by
+§21: the API now holds it too, as a Render secret, for sign-up by invite.)*
 
 ---
 
@@ -567,3 +567,88 @@ reminders — nothing today would deliver a notification.
 `lead.reassigned` from `services/lead.reassign` (the outbox is already on the
 Realtime publication), no migration needed. Open follow-up tasks also stay with
 the old agent on reassignment — move them in the same change if it matters.
+
+---
+
+## 21. An invite is the only way to sign up (012_agent_invites.sql)
+
+**Decision.** Public sign-up is off in Supabase Auth. A `TEAM_ADMIN` creates a
+`core.agent_invite` for **their own agency** with a fixed role (`AGENT` or
+`TEAM_ADMIN`) and gets a token once. Whoever redeems it (`POST /invites/accept`)
+registers themselves — name, email, password — and becomes an agent of that
+agency with that role. Login stays Supabase Auth; Cognito and Keycloak were
+considered and dropped (the API already validates Supabase JWTs, and Keycloak
+needs an always-on host this deploy does not have).
+
+**Agency and role come from the row, never from the request** — the same rule as
+every other `agency_id` (§1). The accept body has no such fields; extra ones are
+ignored. AI agents are not invitable (`role` CHECK excludes `AI_AGENT`); they stay
+provisioned (§17).
+
+**The token is a bearer secret.** An admin invite makes whoever holds it an
+admin, so: 32 random bytes, stored only as sha256 (no salt needed at that
+entropy), shown once, single-use, expiring (72 h default, a week at most),
+revocable, optionally locked to one email. It travels in request bodies and the
+link's `#fragment`, never a path or query string, so it stays out of access logs.
+
+**One token, one agent.** Accept locks the invite row (`FOR UPDATE`) for the
+whole redeem, including the Supabase call, so two concurrent redeems produce one
+201 and one 410. Order: our rows (flushed) → Supabase creates the confirmed user
+→ bind `auth_user_id` → mark redeemed → commit. Supabase failing rolls ours back
+and leaves the invite `PENDING`; our commit failing deletes the Supabase user
+again (best effort, logged if that fails too).
+
+**The cost: the API now holds the service-role key** (amends §15). Creating a
+Supabase user needs it, and the alternative — an Edge Function holding it —
+would split one redeem across two systems with no shared transaction. It lives
+in Render's secrets, is read only by `services/auth_admin.py`, and is used only
+by the two public invite routes. Unset, accept answers 503 and nothing else
+changes. Under `DEV_AUTH_BYPASS` no Supabase call is made and the new agent is
+unbound (it acts through `X-Dev-Agent-Id`).
+
+**Public write routes are an explicit list.** `POST /invites/inspect` and
+`/accept` have no principal, so `tests/test_route_scopes.py` carries
+`PUBLIC_WRITE_ROUTES`, and a second test fails if any listed route resolves an
+agent — the allow-list cannot hide a route that acts as someone.
+
+**Not built:** emailing the link (the domains are `.test`; the notifier can send
+it later), password reset (an admin can
+issue a recovery link with the same key when it is needed), deactivating an
+agent and moving their leads.
+
+**Revisit if** invites must be emailed by the system, or if an agent should
+belong to more than one agency (then the invite targets an existing login
+instead of creating one).
+
+---
+
+## 22. Every domain event records who caused it (013_event_actor.sql)
+
+**Decision.** `events.domain_event` gains `actor_agent_id`: the `core.agent` row
+behind the request, human or `AI_AGENT`. `NULL` is the system (pg_cron's sweep).
+`services/events.emit` takes `actor_id` as a **required** keyword, so every call
+site states who acted or says `None` on purpose — the same idea as the required
+scope on write routes (§17): forgetting must fail, not default.
+
+**Why.** The outbox said what happened, never who. Checking that the Telegram bot
+and any other AI agent behave ("did the bot create this lead, book this visit?")
+meant joining back to whichever core table recorded the write — `changed_by` on
+transitions, `created_by` on interactions and appointments, nothing on leads.
+With the actor on the event, the bot's whole activity is one indexed query
+(`idx_domain_event_actor`), and the future notifier can write "X did Y" without
+those joins. `appointment.*` payloads already carried `actor_id`; that stays, for
+consumers that read only the payload.
+
+**No FK**, like `agency_id` and `aggregate_id` beside it. The outbox is a log;
+an FK to `core.agent` would also make the seeders' `truncate core.agent ...
+cascade` wipe it.
+
+**Backfill, exact matches only.** `appointment.*` from the payload's `actor_id`.
+`lead.created` and `lead.stage_changed` from their transition's `changed_by`:
+the event and the transition are written in one transaction, so `occurred_at`
+equals `changed_at` (both `now()`), and from/to must match too. Anything else
+stays `NULL` rather than guessed. `tests/test_events.py` runs the migration's own
+UPDATE statements, so the test cannot drift from what is applied.
+
+**Revisit if** a non-agent principal (a webhook integration) starts emitting
+events — then the actor needs a kind, not just an agent id.

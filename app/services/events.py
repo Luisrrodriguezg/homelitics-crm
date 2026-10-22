@@ -32,14 +32,21 @@ def emit(
     aggregate_type: str,
     aggregate_id: uuid.UUID,
     agency_id: uuid.UUID,
+    actor_id: uuid.UUID | None,
     payload: dict | None = None,
 ) -> DomainEvent:
-    """Stage an outbox row in the caller's transaction. Does not commit."""
+    """Stage an outbox row in the caller's transaction. Does not commit.
+
+    `actor_id` is required, not defaulted: every caller states who acted (the
+    core.agent row, human or AI_AGENT) or passes None for the system, so a new
+    event cannot silently lose its author (013).
+    """
     event = DomainEvent(
         event_type=event_type,
         aggregate_type=aggregate_type,
         aggregate_id=aggregate_id,
         agency_id=agency_id,
+        actor_agent_id=actor_id,
         payload=payload or {},
     )
     session.add(event)

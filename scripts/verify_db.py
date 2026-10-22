@@ -39,6 +39,8 @@ CORE_TABLES = {
     "service_account",
     # from 009_calendar.sql
     "agent_external_calendar",
+    # from 012_agent_invites.sql
+    "agent_invite",
 }
 ANALYTICS_VIEWS = {
     "funnel_daily", "agent_response_time", "listing_performance",
@@ -61,6 +63,10 @@ EXPECTED_INDEXES = {
     "uq_person_telegram_user_id",
     # from 009_calendar.sql
     "uq_appointment_open_per_lead", "uq_visit_feedback_side", "uq_agent_time_off_ics",
+    # from 012_agent_invites.sql
+    "idx_agent_invite_agency",
+    # from 013_event_actor.sql
+    "idx_domain_event_actor",
 }
 
 
@@ -217,6 +223,16 @@ def verify_structure(cur):
                                     and column_name = 'lost_reason'""")
     check("analytics.lead_outcome exposes lost_reason (010)", has_lost_reason == 1,
           "" if has_lost_reason else "apply migrations/010_lost_reason_analytics.sql")
+
+    # 012 / 013: the models map both, so code ahead of them fails /health.
+    has_invites = one(cur, "select to_regclass('core.agent_invite') is not null") is True
+    check("core.agent_invite exists (012)", has_invites,
+          "" if has_invites else "apply migrations/012_agent_invites.sql")
+    has_actor = one(cur, """select count(*) from information_schema.columns
+                             where table_schema='events' and table_name='domain_event'
+                               and column_name='actor_agent_id'""") == 1
+    check("events.domain_event.actor_agent_id exists (013)", has_actor,
+          "" if has_actor else "apply migrations/013_event_actor.sql")
 
     # The reason running without RLS is safe: PostgREST simply cannot reach these
     # schemas. The ONE deliberate exception (004_events_outbox.sql) is a SELECT on

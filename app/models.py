@@ -114,6 +114,25 @@ class Agent(Base):
         return self.role == "AI_AGENT"
 
 
+class AgentInvite(Base):
+    """012. The only way to sign up: whoever redeems the token becomes an agent
+    of `agency_id` with `role`. The token is stored only as its sha256."""
+    __tablename__ = "agent_invite"
+    __table_args__ = {"schema": "core"}
+
+    id: Mapped[uuid.UUID] = _pk()
+    agency_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("core.agency.id"), nullable=False)
+    role: Mapped[str] = mapped_column(Text, nullable=False)
+    email: Mapped[str | None] = mapped_column(Text)
+    token_hash: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    created_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("core.agent.id"), nullable=False)
+    created_at: Mapped[datetime] = _ts(server_default=func.now())
+    expires_at: Mapped[datetime] = _ts(nullable=False)
+    redeemed_at: Mapped[datetime | None] = _ts()
+    redeemed_agent_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("core.agent.id"))
+    revoked_at: Mapped[datetime | None] = _ts()
+
+
 class Owner(Base):
     __tablename__ = "owner"
     __table_args__ = {"schema": "core"}
@@ -421,3 +440,5 @@ class DomainEvent(Base):
     occurred_at: Mapped[datetime] = _ts(server_default=func.now())
     published_at: Mapped[datetime | None] = _ts()
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    # 013. The core.agent row that acted (human or AI_AGENT); NULL = the system.
+    actor_agent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))

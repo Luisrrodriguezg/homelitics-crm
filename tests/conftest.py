@@ -203,7 +203,7 @@ async def world(session):
         Lead, LeadLostDetail, LeadStageTransition, Offer, PropertyView, VisitFeedback,
     )
     from app.models import (
-        AgentAvailability, AgentTimeOff, Property as P, Owner as O, Agency as A,
+        AgentAvailability, AgentInvite, AgentTimeOff, Property as P, Owner as O, Agency as A,
         Agent as G, Client as C, ServiceAccount as SA,
     )
 
@@ -229,6 +229,7 @@ async def world(session):
     await _run(delete(Listing).where(Listing.id.in_(listing_ids)))
     await _run(delete(AgentAvailability).where(AgentAvailability.agent_id.in_(agent_ids)))
     await _run(delete(AgentTimeOff).where(AgentTimeOff.agent_id.in_(agent_ids)))
+    await _run(delete(AgentInvite).where(AgentInvite.agency_id.in_(agency_ids)))
     # By tagged person, not just the two fixture ids: POST /clients in a test
     # makes more, and a leftover client row would block the pii.person sweep.
     tagged = select(Person.id).where(Person.full_name.like(f"{tag}%"))
