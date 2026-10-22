@@ -41,8 +41,8 @@ Target metrics (from the backlog):
   so re-running wipes and recreates. Paste into Supabase SQL Editor and Run.
   Click "Run without RLS" on the warning popup. Run `scripts/verify_db.py` first —
   if the live schema has drifted, this file will silently destroy it.
-- `migrations/` — `001_schema.sql` (the baseline) then `002`–`010` (additive,
-  idempotent). `schema-2.sql` is kept equal to 001 + … + 010 (folded in place,
+- `migrations/` — `001_schema.sql` (the baseline) then `002`–`013` (additive,
+  idempotent). `schema-2.sql` is kept equal to 001 + … + 013 (folded in place,
   not appended — diff the catalogs of both on a throwaway DB to check).
 - `render.yaml` — free Render deploy. `scripts/provision_agent_users.py` — one
   Auth login per real agent (Admin API), replaces hand-made users.
@@ -51,17 +51,18 @@ Target metrics (from the backlog):
 - `app/` — the FastAPI service. `README.md` covers setup and the EC2 runbook;
   `docs/DECISIONS.md` records the structural choices and why.
 
-## Schema (25 tables, 4 schemas)
+## Schema (26 tables, 4 schemas)
 
 **`pii`** — `person`. Every human lives here exactly once. `telegram_user_id`
 (`008`, UNIQUE) is how a returning Telegram contact is recognised.
 
-**`core`** (23) — `agency`, `agent`, `owner`, `client`, `property`, `listing`,
+**`core`** (24) — `agency`, `agent`, `owner`, `client`, `property`, `listing`,
 `lead`, `lead_stage`, `lead_stage_transition`, `lost_reason`, `lead_lost_detail`,
 `interaction`, `appointment`, `objection`, `visit_feedback`, `follow_up_task`,
 `assignment_audit`, `offer`, `deal`, `agent_availability`, `agent_time_off`
 (`003`), `service_account` (`007` — the credential behind an AI agent),
-`agent_external_calendar` (`009` — an agent's own calendar, read for busy time)
+`agent_external_calendar` (`009` — an agent's own calendar, read for busy time),
+`agent_invite` (`012` — the only way to sign up)
 
 **`events`** — `property_view` (append-only, one row per listing page view)
 
@@ -108,7 +109,7 @@ exclusively, never from `core` — which is why **every** one of the five expose
 |---|---|
 | Appointment exclusion constraint | Double-booking prevention is FastAPI's job: query `idx_appointment_agent` for overlaps before insert. Removed because `EXCLUDE USING gist` with an inline `tstzrange` isn't IMMUTABLE and won't create. |
 | `consent` table | HU-20 is Won't-this-sprint. Synthetic data ⇒ no data subjects ⇒ no consent obligation during development. |
-| Kafka / event bus | Sync calls + scheduled jobs. `events.domain_event` (`004`) is a transactional outbox: `services/events.emit` writes in the caller's transaction, `events.relay_domain_events()` (`005`, pg_cron every 2 min) publishes. The event *data model* survives; only the broker is gone. |
+| Kafka / event bus | Sync calls + scheduled jobs. `events.domain_event` (`004`) is a transactional outbox: `services/events.emit` writes in the caller's transaction (with the acting agent, `013`), `events.relay_domain_events()` (`005`, pg_cron every 2 min) publishes. The event *data model* survives; only the broker is gone. |
 | Always-on host | Jobs run in pg_cron (`005`), so the container may sleep. Free Render deploy via `render.yaml`. `ENABLE_SCHEDULER` is local-only. `docs/DECISIONS.md` §14. |
 | Materialized views | Plain views. Always fresh, no refresh job. Backed by measurement — see `docs/DECISIONS.md` §13 (`scripts/measure_views.py`), p95 ≤ 133 ms. Revisit only if one crosses ~500 ms. |
 | `updated_at` triggers | The API sets `updated_at` on write. |
@@ -268,6 +269,18 @@ is cut by decision (`docs/DECISIONS.md` §20).
 (inclusive days in `APP_TIMEZONE`), `active`. No migration. `LeadOut` is unchanged
 for `POST /leads` and `GET /leads/{id}`, so the bot is unaffected.
 
+### Sign-up by invite (012)
+
+Public sign-up is off in Supabase. A TEAM_ADMIN `POST /invites` (role `AGENT` or
+`TEAM_ADMIN`, optional email lock) and gets the token **once** (stored as
+sha256). The invitee calls the public `POST /invites/inspect` / `/accept` with it
+in the body; accept creates the Supabase login via `services/auth_admin.py` and
+the agent row in the **invite's** agency with the **invite's** role — the body can
+choose neither. Row lock ⇒ one token, one agent. The API now holds
+`SUPABASE_SERVICE_ROLE_KEY` (Render secret; unset ⇒ accept is 503). Public write
+routes are the explicit `PUBLIC_WRITE_ROUTES` in `tests/test_route_scopes.py`.
+`docs/DECISIONS.md` §21.
+
 ### Local one-command dev
 
 `docker compose --profile local up --build` — throwaway `postgres:17-alpine`,
@@ -289,8 +302,8 @@ default Mon–Fri availability for the 48 agents) — the exact SQL is in the
 session's `phase0_cleanup.sql`; `scripts/purge_test_rows.sql` is the reusable part.
 `tests/conftest.py` now refuses a non-local `DATABASE_URL` so debris cannot recur.
 
-Migrations `001`–`010` are applied to the live DB; `scripts/verify_db.py` is green
-(36/36). `007` went on 2026-09-10 via the Supabase connector's `apply_migration`;
+Migrations `001`–`013` are applied to the live DB; `scripts/verify_db.py` is green
+(38/38 since 013). `007` went on 2026-09-10 via the Supabase connector's `apply_migration`;
 its new response definition moved 96 leads to `never_answered` (the 72h sweep's
 auto-note had been counting as their first response). Ground truth held: slow
 28.8h vs fast 2.0h.
@@ -307,6 +320,12 @@ ground truth unchanged.
 `010` went on 2026-09-24 the same way, before its code merged: `lead_outcome`
 gained `lost_reason`; the pre-existing 15 columns hash identically before and
 after (9,407 rows), all 8,502 LOST leads carry a reason. `verify_db.py` 36/36.
+`012` (invites) and `013` (event actor) went on 2026-10-22 with
+`scripts/apply_migrations.py 012_agent_invites.sql 013_event_actor.sql`, before
+their code merged. 013's backfill set the actor on 31 of 394 events (15
+`appointment.*` from the payload, 16 lead events matched on their transition);
+the 346 `lead.went_cold` stay NULL (system). `verify_db.py` 38/38, ground truth
+unchanged.
 Worktrees have no `.env`; scripts use the main checkout's
 `/Users/luisrro/Desktop/Proyecto Home/.env`.
 
@@ -314,6 +333,11 @@ The AI agent is provisioned: service account `ai-agent` exists with an
 `AI_AGENT` row in all 6 agencies, and the service-account code is on `main`.
 
 ### Outstanding
+
+- **Invites need two dashboard steps:** set `SUPABASE_SERVICE_ROLE_KEY` as a
+  Render secret (until then `POST /invites/accept` is 503) and turn off "Allow
+  new users to sign up" in Supabase Auth. `FRONTEND_URL` / `CORS_ORIGINS` once
+  the CloudFront frontend exists.
 
 - **Deploy order for future migrations:** apply to `homelitics` **before**
   merging code that uses them. Render auto-deploys, and a model column the DB

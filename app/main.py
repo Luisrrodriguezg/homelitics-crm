@@ -18,7 +18,8 @@ from app.config import get_settings
 from app.db import dispose_engine
 from app.jobs import build_scheduler
 from app.routers import (
-    agents, analytics, appointments, availability, calendar, clients, health, leads, listings,
+    agents, analytics, appointments, availability, calendar, clients, health, invites, leads,
+    listings,
 )
 
 settings = get_settings()
@@ -82,6 +83,8 @@ app = FastAPI(
                                             ".ics feed, and the agent's own calendar as busy time."},
         {"name": "listings", "description": "Catalogue and view events."},
         {"name": "analytics", "description": "Reads the analytics schema only, never core."},
+        {"name": "invites", "description": "The only way to sign up: a TEAM_ADMIN invites, "
+                                           "the invitee redeems the token and registers."},
     ],
 )
 
@@ -119,6 +122,7 @@ async def database_error_handler(request: Request, exc: SQLAlchemyError):
 app.include_router(health.router)
 app.include_router(agents.router)
 app.include_router(clients.router)
+app.include_router(invites.router)
 app.include_router(leads.router)
 app.include_router(appointments.lead_router)
 app.include_router(appointments.router)

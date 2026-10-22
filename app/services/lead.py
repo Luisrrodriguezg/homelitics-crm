@@ -131,6 +131,7 @@ async def create_or_get_lead(
         aggregate_type="lead",
         aggregate_id=new_id,
         agency_id=agency_id,
+        actor_id=actor.id if actor else None,
         payload={"listing_id": str(listing_id), "client_id": str(client_id),
                  "agent_id": str(listing.agent_id)},
     )
@@ -256,6 +257,7 @@ def insert_transition(
         aggregate_type="lead",
         aggregate_id=lead_id,
         agency_id=agency_id,
+        actor_id=actor.id,
         payload={"from": from_stage, "to": to_stage},
     )
     return transition

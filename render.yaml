@@ -44,3 +44,12 @@ services:
       # postgresql+asyncpg://...). It contains the database password.
       - key: DATABASE_URL
         sync: false
+      # 012: lets POST /invites/accept create the invitee's Supabase login.
+      # Supabase -> Settings -> API -> service_role. Secret: dashboard only.
+      # Unset, sign-up by invite answers 503 and everything else works.
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      # Invite links are <FRONTEND_URL>/invite#<token>. Set it to the
+      # CloudFront URL once the frontend is deployed (CORS_ORIGINS too).
+      - key: FRONTEND_URL
+        sync: false

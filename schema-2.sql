@@ -82,6 +82,27 @@ create unique index idx_agent_service_account_agency
   on core.agent (service_account_id, agency_id)
   where service_account_id is not null;
 
+-- 012: an invite is the only way to sign up. Agency and role come from the
+-- invite; the token is stored only as its sha256.
+create table core.agent_invite (
+  id                uuid primary key default gen_random_uuid(),
+  agency_id         uuid not null references core.agency(id),
+  role              text not null check (role in ('AGENT','TEAM_ADMIN')),
+  email             text,   -- optional lock, lower-cased
+  token_hash        text not null unique,
+  created_by        uuid not null references core.agent(id),
+  created_at        timestamptz not null default now(),
+  expires_at        timestamptz not null,
+  redeemed_at       timestamptz,
+  redeemed_agent_id uuid references core.agent(id),
+  revoked_at        timestamptz,
+  check (expires_at > created_at),
+  check ((redeemed_at is null) = (redeemed_agent_id is null)),
+  check (redeemed_at is null or revoked_at is null)
+);
+
+create index idx_agent_invite_agency on core.agent_invite (agency_id, created_at desc);
+
 create table core.owner (
   id         uuid primary key default gen_random_uuid(),
   person_id  uuid not null references pii.person(id),
@@ -539,12 +560,18 @@ create table if not exists events.domain_event (
   payload        jsonb not null default '{}',
   occurred_at    timestamptz not null default now(),
   published_at   timestamptz,
-  attempts       integer not null default 0
+  attempts       integer not null default 0,
+  -- 013: the core.agent row that acted (human or AI_AGENT); NULL = the system.
+  -- No FK, like agency_id: the outbox is a log and outlives re-seeds.
+  actor_agent_id uuid
 );
 
 create index if not exists idx_domain_event_unpublished
   on events.domain_event (occurred_at)
   where published_at is null;
+create index if not exists idx_domain_event_actor
+  on events.domain_event (actor_agent_id, occurred_at)
+  where actor_agent_id is not null;
 
 do $$
 begin

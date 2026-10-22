@@ -50,6 +50,11 @@ CLI, or a password-grant call to `${SUPABASE_URL}/auth/v1/token?grant_type=passw
 - **401** — missing, malformed, or expired token
 - **403** — valid token, but no `core.agent` is bound to that user
 
+**Real people sign up only by invite** (§6.0a): a `TEAM_ADMIN` issues one, the
+invitee redeems it, and their login is created already bound. Public sign-up is
+off in Supabase Auth, so `signUp()` from the frontend is refused; the
+provisioning script is for the seeded demo agents only.
+
 ### 2b. Local development — `DEV_AUTH_BYPASS`
 
 The compose `local` profile starts the API with `DEV_AUTH_BYPASS=true`. There is
@@ -369,6 +374,50 @@ curl -s -H "$AUTH" $BASE/me
 #### `GET /health`
 Open, no auth. `200` only if a round-trip to Postgres succeeds; `503` otherwise.
 Safe as a container healthcheck.
+
+### 6.0a Invites — the only way to sign up
+
+The invite decides **which agency and which role** (`AGENT` or `TEAM_ADMIN`);
+nothing the invitee sends can change either. One token makes one agent.
+
+#### `POST /invites` — `TEAM_ADMIN` only → **201**
+```json
+{"role": "AGENT", "email": "ana@agency.co", "expires_in_hours": 48}
+```
+All fields optional (`role` defaults to `AGENT`, expiry to `INVITE_TTL_HOURS` = 72,
+max 168). `email` locks the invite to that address. The response carries
+`token` and `invite_url` (`<FRONTEND_URL>/invite#<token>`) — **the only time the
+token is ever shown**; it is stored as a hash. Lost it? Revoke and issue another.
+Anyone holding the token joins your agency, as an admin if that is the role.
+
+#### `GET /invites` — `TEAM_ADMIN` only
+Your agency's invites, newest first, each with `status`:
+`PENDING | REDEEMED | REVOKED | EXPIRED`. Never the token.
+
+#### `DELETE /invites/{invite_id}` — `TEAM_ADMIN` only → **204**
+Revoke. Idempotent; **404** for another agency's invite, **409** once redeemed.
+
+#### `POST /invites/inspect` — public
+`{"token": "…"}` → `{"agency_name", "role", "email", "expires_at"}`, for the
+sign-up page's "You're joining *X* as *Admin*". **404** unknown, **410** expired,
+revoked or used.
+
+#### `POST /invites/accept` — public → **201**
+```json
+{"token": "…", "full_name": "Ana Gómez", "email": "ana@agency.co",
+ "password": "at-least-8", "phone": "+57 300 000 0000"}
+```
+Creates the Supabase login (confirmed, no email sent) and the `core.agent` row,
+bound, and returns the `AgentOut` (as `GET /me`). Then sign in with
+`signInWithPassword` using the same email and password.
+**403** invite locked to another email · **404** unknown token · **409** email
+already has an account · **410** expired/revoked/used · **503** sign-up not
+configured (`SUPABASE_SERVICE_ROLE_KEY` unset). A failed accept leaves the invite
+`PENDING`. Emits `agent.joined`.
+
+Both public routes take the token in the **body**, never the URL, so it stays
+out of access logs. The frontend reads it from the link's `#fragment`, which the
+browser never sends to CloudFront either.
 
 ---
 
@@ -1102,6 +1151,21 @@ locked` so two runners can never publish the same event twice.
 | `appointment.confirmed` / `.cancelled` / `.completed` / `.no_show` / `.reopened` | a visit's status changes (`.cancelled` also when its lead is closed — `reason: lead_won`/`lead_lost`) | appointment id | the same, plus `previous_status`, `previous_scheduled_at` | — |
 | `appointment.rescheduled` | a visit moves in time | appointment id | the same | — |
 | `lead.went_cold` | the inactivity sweep flags a lead | lead id | `inactivity_hours` | — |
+| `agent.joined` | an invite is redeemed (§6.0a) | the new agent's id | `role`, `invite_id` | — |
+
+**Every row says who acted** (`actor_agent_id`, migration 013): the `core.agent`
+row behind the request — a human, or an `AI_AGENT` row (join `core.agent` and
+read `role`). `NULL` means the system (pg_cron's sweep) or an old event the
+backfill could not match. `emit()` takes `actor_id` as a required argument, so a
+new event cannot forget it. Auditing the bot is one query:
+
+```sql
+select e.occurred_at, e.event_type, e.aggregate_id, e.payload
+from events.domain_event e
+join core.agent a on a.id = e.actor_agent_id
+where a.role = 'AI_AGENT' and e.agency_id = :agency_id
+order by e.occurred_at desc limit 100;
+```
 
 The `appointment.*` events are recorded for audit and for the dashboard's
 Realtime feed. Nothing delivers them to clients: the bot reads the current state
@@ -1117,7 +1181,7 @@ There is no HTTP endpoint for events; read them from the database or Realtime:
 
 ```bash
 docker compose exec db psql -U postgres -c \
-  "select event_type, published_at is not null as published, payload
+  "select event_type, actor_agent_id, published_at is not null as published, payload
    from events.domain_event order by id desc limit 10"
 ```
 

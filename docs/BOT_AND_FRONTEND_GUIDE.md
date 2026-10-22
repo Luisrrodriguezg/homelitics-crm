@@ -146,6 +146,27 @@ Authenticates as a normal human agent (Supabase JWT) — no `X-Agency-Id`
 needed, the agent's own agency scopes everything. Anything outside it is a
 404, never a 403.
 
+**Login.** supabase-js with the project URL and the publishable key (both
+public). `signInWithPassword`, then send `session.access_token` as the Bearer
+on every call; supabase-js refreshes it. Right after login call `GET /me`:
+`role` picks the admin or the agent views, and a **403** means "this login is
+not linked to an agent" — show that, not a generic error. Ping `/health` when
+the login page loads: the free Render instance takes about a minute to wake.
+
+**Sign-up is by invite only** (`docs/API_GUIDE.md` §6.0a). There is no
+`signUp()` — public sign-up is off in Supabase.
+- *Admin → Team → Invite:* `POST /invites` with a role, optionally an email;
+  show `invite_url` once with a copy button (it cannot be fetched again).
+  `GET /invites` lists them; `DELETE /invites/{id}` revokes.
+- *`/invite` page:* read the token from `location.hash`, `POST /invites/inspect`
+  to show agency and role, then a form (name, email, password, phone) →
+  `POST /invites/accept` → `signInWithPassword` with the same email and password.
+
+Supabase dashboard, once: Authentication → turn **off** "Allow new users to
+sign up"; set the Site URL to the CloudFront domain. On Render set
+`FRONTEND_URL` and `CORS_ORIGINS` to that domain. CloudFront: serve
+`index.html` for 403/404 so `/invite` loads.
+
 | Screen | Endpoints |
 |---|---|
 | Funnel board | `GET /leads` (filter by `stage`, `agent_id`, `listing_id`) |

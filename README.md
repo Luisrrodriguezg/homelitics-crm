@@ -307,7 +307,8 @@ logs a warning if you try. Inspect the jobs with
 
 `services/events.emit` writes an `events.domain_event` row **in the request's
 transaction** (`lead.created`, `lead.stage_changed`, `appointment.booked` and
-every later `appointment.*` change, `lead.went_cold`). The relay above stamps `published_at`, taking its batch
+every later `appointment.*` change, `lead.went_cold`, `agent.joined`), each with
+the `actor_agent_id` that caused it (013; NULL = the system). The relay above stamps `published_at`, taking its batch
 `for update skip locked` so two runners can never publish the same row.
 The table is on the `supabase_realtime` publication with RLS + an agency policy —
 the only grant `authenticated` holds anywhere in our schemas.
@@ -325,7 +326,10 @@ the only grant `authenticated` holds anywhere in our schemas.
 | `CALENDAR_SYNC_TTL_MINUTES`, `CALENDAR_FETCH_TIMEOUT_S`, `CALENDAR_IMPORT_WINDOW_DAYS` | `15`, `3`, `60` | the agent-calendar import: re-sync age, fetch timeout, how far ahead |
 | `CALENDAR_IMPORT_HOSTS` | Google, Outlook, iCloud | allow-list of hosts the import may fetch (SSRF guard) |
 | `DEV_AUTH_BYPASS` | `false` | local only — identity from `X-Dev-Agent-Id`; app refuses to start against a non-local DB |
-| `SUPABASE_SERVICE_ROLE_KEY`, `DEMO_AGENT_PASSWORD` | — | read **only** by `scripts/provision_agent_users.py`; the API never needs them |
+| `SUPABASE_SERVICE_ROLE_KEY` | — | lets `POST /invites/accept` create the invitee's Supabase login (unset → that route answers 503). Also read by `scripts/provision_agent_users.py`. A Render secret, never in a frontend — `docs/DECISIONS.md` §21 |
+| `FRONTEND_URL` | — | invite links are `<FRONTEND_URL>/invite#<token>`; unset → the admin gets the bare token |
+| `INVITE_TTL_HOURS` | `72` | default invite lifetime (a request may ask for 1–168) |
+| `DEMO_AGENT_PASSWORD` | — | read **only** by `scripts/provision_agent_users.py` |
 
 ---
 
