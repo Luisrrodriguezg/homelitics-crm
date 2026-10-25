@@ -19,7 +19,7 @@ from app.db import dispose_engine
 from app.jobs import build_scheduler
 from app.routers import (
     agents, analytics, appointments, availability, calendar, clients, health, invites, leads,
-    listings,
+    listings, notifications,
 )
 
 settings = get_settings()
@@ -128,6 +128,7 @@ app.include_router(appointments.lead_router)
 app.include_router(appointments.router)
 app.include_router(availability.router)
 app.include_router(calendar.router)
+app.include_router(notifications.router)
 app.include_router(listings.router)
 app.include_router(analytics.router)
 

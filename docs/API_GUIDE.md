@@ -342,6 +342,7 @@ curl -s -H "$AUTH" $BASE/analytics/north-star | jq
 | Visit | `core.appointment` | **the calendar** — one row per visit; the owner confirms; confirming / completing moves the lead's stage; feedback after |
 | Availability | `core.agent_availability` / `agent_time_off` | weekly rules + time off (manual, or busy time imported from the agent's own calendar) |
 | The agent's own calendar | `core.agent_external_calendar` | a Google/Outlook/iCloud iCal address, read for busy time only (§6.10) |
+| Inbox | `core.notification` | one message per recipient when the bot or an admin assigns a lead or books a visit; `read_at` is the read flag (§6.11) |
 | Events | `events.domain_event` | transactional outbox (see §8) |
 | Dashboards | `analytics.*` views | read these, never `core` |
 
@@ -696,9 +697,9 @@ transaction (doing only one was the seeder's original bug).
 - **404** — target agent is not an active agent in your agency
 - **409** — target is deactivated, already owns the lead, or is an AI agent
 
-The new owner is **not notified** — no event, no push (HU-08 AC2 is cut by
-decision, `docs/DECISIONS.md` §20). The lead simply appears on their board
-(`GET /leads?agent_id=`); the history is `assignment_audit`.
+The new owner gets a `LEAD_ASSIGNED` message in their inbox (§6.11) and a
+`lead.reassigned` event is emitted (HU-08 AC2, `docs/DECISIONS.md` §23). The
+history is `assignment_audit`.
 
 ---
 
@@ -1105,6 +1106,42 @@ calendar does that), or close a lead (unless granted `leads:close`). Agents'
 changes are not pushed to clients: an agent who moves or cancels a confirmed
 visit should tell the client.
 
+### 6.11 Notifications — the in-app inbox (migration `014`)
+
+A message is written when **the AI agent or a `TEAM_ADMIN`** hands an agent work:
+
+| `type` | when | recipient |
+|---|---|---|
+| `LEAD_ASSIGNED` (`assigned_via: CREATED`) | the bot (or an admin) creates a lead on the agent's listing | the listing's agent |
+| `LEAD_ASSIGNED` (`assigned_via: REASSIGNED`) | an admin reassigns a lead | the new owner |
+| `VISIT_SCHEDULED` | the bot or an admin books a visit on a lead | the lead's owner |
+
+Never for something the recipient did, never for an ordinary agent's actions.
+Written in the same transaction as the lead or visit. Full frontend guide, with
+example payloads and UI rules: `docs/NOTIFICATIONS.md`.
+
+#### `GET /me/notifications` — your inbox
+Newest first, at most **20** per page. Filters: `type`, `read` (`false` = unread
+only), `before` (= `next_before` of the previous page), `limit` (1–20).
+```bash
+curl -s -H "$AUTH" "$BASE/me/notifications" | jq '{unread_count, first: .items[0]}'
+```
+Returns `{items, unread_count, next_before}`. With no filters `unread_count` is
+the bell badge. Reading the list marks nothing read.
+
+#### `POST /me/notifications/{id}/read` → **204**
+When the agent opens a message. Idempotent (`read_at` keeps the first time);
+**404** if it is not yours.
+
+#### `POST /me/notifications/read-all`
+`{"marked": n}`.
+
+#### `GET /notifications` — the admin monitor, `TEAM_ADMIN` only
+Every message in your agency, same item shape. Filters: `recipient_agent_id`,
+`actor_agent_id`, `by_bot`, `type`, `read`, `lead_id`, `created_from`/`created_to`
+(inclusive days, `America/Bogota`), `before`, `limit`. Viewing never marks
+anything read. **403** for non-admins, **422** if `created_from > created_to`.
+
 ---
 
 ## 7. Automatic background work
@@ -1150,6 +1187,7 @@ locked` so two runners can never publish the same event twice.
 | `appointment.booked` | a visit is booked (not on the 200 retry path) | appointment id | `lead_id`, `agent_id`, `scheduled_at`, `duration_min`, `status`, `actor_id`, `by_bot` | — |
 | `appointment.confirmed` / `.cancelled` / `.completed` / `.no_show` / `.reopened` | a visit's status changes (`.cancelled` also when its lead is closed — `reason: lead_won`/`lead_lost`) | appointment id | the same, plus `previous_status`, `previous_scheduled_at` | — |
 | `appointment.rescheduled` | a visit moves in time | appointment id | the same | — |
+| `lead.reassigned` | a `TEAM_ADMIN` reassigns a lead | lead id | `agent_id` (new owner), `from_agent_id` | — |
 | `lead.went_cold` | the inactivity sweep flags a lead | lead id | `inactivity_hours` | — |
 | `agent.joined` | an invite is redeemed (§6.0a) | the new agent's id | `role`, `invite_id` | — |
 
@@ -1227,6 +1265,7 @@ Body shape: `{"detail": "..."}` (string) for app errors, or
 | weekday | `0` Mon … `6` Sun |
 | Time-off source | `MANUAL`, `ICS` (imported from the agent's own calendar) |
 | Calendar event kind | `VISIT`, `TIME_OFF`, `AVAILABILITY` |
+| Notification type | `LEAD_ASSIGNED`, `VISIT_SCHEDULED` |
 
 ---
 
