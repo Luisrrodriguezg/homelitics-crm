@@ -41,6 +41,8 @@ CORE_TABLES = {
     "agent_external_calendar",
     # from 012_agent_invites.sql
     "agent_invite",
+    # from 014_notifications.sql
+    "notification",
 }
 ANALYTICS_VIEWS = {
     "funnel_daily", "agent_response_time", "listing_performance",
@@ -67,6 +69,8 @@ EXPECTED_INDEXES = {
     "idx_agent_invite_agency",
     # from 013_event_actor.sql
     "idx_domain_event_actor",
+    # from 014_notifications.sql
+    "idx_notification_recipient", "idx_notification_unread", "idx_notification_agency",
 }
 
 

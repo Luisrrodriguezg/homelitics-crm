@@ -25,7 +25,7 @@ from app.models import (
     Property,
 )
 from app.schemas import ALLOWED_TRANSITIONS, RESPONSE_TYPES, TERMINAL_STAGES, LeadOut
-from app.services import events
+from app.services import events, notification
 
 
 def _agency_scope() -> Select:
@@ -134,6 +134,12 @@ async def create_or_get_lead(
         actor_id=actor.id if actor else None,
         payload={"listing_id": str(listing_id), "client_id": str(client_id),
                  "agent_id": str(listing.agent_id)},
+    )
+    # Inbox: only when the bot or an admin made the lead for someone else.
+    notification.notify(
+        session, type="LEAD_ASSIGNED", agency_id=agency_id,
+        recipient_id=listing.agent_id, actor=actor, lead_id=new_id,
+        data={"via": "CREATED"},
     )
     await session.commit()
 
@@ -388,6 +394,21 @@ async def reassign(
             to_agent_id=target.id,
             reassigned_by=actor.id,
         )
+    )
+    events.emit(
+        session,
+        event_type="lead.reassigned",
+        aggregate_type="lead",
+        aggregate_id=lead_id,
+        agency_id=actor.agency_id,
+        actor_id=actor.id,
+        payload={"agent_id": str(target.id), "from_agent_id": str(previous_agent_id)},
+    )
+    # HU-08 AC2: the new owner hears about it in their inbox.
+    notification.notify(
+        session, type="LEAD_ASSIGNED", agency_id=actor.agency_id,
+        recipient_id=target.id, actor=actor, lead_id=lead_id,
+        data={"via": "REASSIGNED", "from_agent_id": str(previous_agent_id)},
     )
     await session.commit()
     await session.refresh(lead)

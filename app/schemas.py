@@ -562,6 +562,54 @@ class StageConversionOut(BaseModel):
 NorthStarOut.model_rebuild()
 
 
+# ------------------------------------------------------------ notifications (014)
+
+NotificationType = Literal["LEAD_ASSIGNED", "VISIT_SCHEDULED"]
+
+
+class NotificationOut(BaseModel):
+    """One inbox message. The frontend writes the sentence from these facts."""
+    id: int
+    type: NotificationType
+    read: bool
+    read_at: datetime | None
+    created_at: datetime
+    recipient_agent_id: uuid.UUID
+    recipient_name: str | None
+    # Who caused it. actor_role is AI_AGENT (the Telegram bot) or TEAM_ADMIN.
+    actor_agent_id: uuid.UUID | None
+    actor_name: str | None
+    actor_role: Literal["AGENT", "TEAM_ADMIN", "AI_AGENT"] | None
+    lead_id: uuid.UUID
+    client_name: str | None
+    listing_address: str | None
+    neighborhood: str | None
+    # LEAD_ASSIGNED only: CREATED (the bot or an admin opened it for you) or
+    # REASSIGNED (an admin moved it to you from from_agent_id).
+    assigned_via: Literal["CREATED", "REASSIGNED"] | None
+    from_agent_id: uuid.UUID | None
+    # VISIT_SCHEDULED only. visit_* is the visit as it is now; booked_status is
+    # what it was booked as (PENDING_CONFIRMATION = it needed your confirmation).
+    appointment_id: uuid.UUID | None
+    visit_scheduled_at: datetime | None
+    visit_duration_min: int | None
+    visit_status: AppointmentStatus | None
+    booked_status: AppointmentStatus | None
+
+
+class NotificationPage(BaseModel):
+    items: list[NotificationOut]
+    # Unread messages matching the filters, across all pages (ignores `read`
+    # and `before`). Unfiltered GET /me/notifications: the bell badge.
+    unread_count: int
+    # Pass as `before` for the next (older) page; null on the last page.
+    next_before: int | None
+
+
+class MarkedRead(BaseModel):
+    marked: int
+
+
 # ------------------------------------------------------------------- common
 
 class Message(BaseModel):

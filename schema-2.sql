@@ -314,6 +314,26 @@ create table core.assignment_audit (
   reassigned_at timestamptz not null default now()
 );
 
+-- 014: the in-app inbox. One row per message per recipient, written when the AI
+-- agent or a TEAM_ADMIN assigns a lead or books a visit. No names or text: the
+-- API joins them in on read, so erasing pii.person still erases everything.
+create table core.notification (
+  id                 bigint generated always as identity primary key,
+  agency_id          uuid not null references core.agency(id),
+  recipient_agent_id uuid not null references core.agent(id) on delete cascade,
+  type               text not null check (type in ('LEAD_ASSIGNED','VISIT_SCHEDULED')),
+  lead_id            uuid not null references core.lead(id) on delete cascade,
+  appointment_id     uuid references core.appointment(id) on delete cascade,
+  actor_agent_id     uuid references core.agent(id) on delete set null,
+  data               jsonb not null default '{}',
+  created_at         timestamptz not null default now(),
+  read_at            timestamptz,
+  check ((type = 'VISIT_SCHEDULED') = (appointment_id is not null))
+);
+create index idx_notification_recipient on core.notification (recipient_agent_id, id desc);
+create index idx_notification_unread    on core.notification (recipient_agent_id) where read_at is null;
+create index idx_notification_agency    on core.notification (agency_id, id desc);
+
 -- ============================================================
 -- core: money
 -- ============================================================

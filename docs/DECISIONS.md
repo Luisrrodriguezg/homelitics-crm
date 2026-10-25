@@ -558,8 +558,9 @@ the bot's `?client_id=` lookup is untouched. The reason stays in the lead's
 history as a `Lost: <reason>` STATUS_CHANGE timeline line, written with the
 transition — STATUS_CHANGE is never a response, so the clock is unaffected.
 
-**Decision (HU-08 AC2, decided with Luis).** A reassigned agent is **not
-notified**. No event, no push, no auto-task: the lead appears on their board and
+**Decision (HU-08 AC2, decided with Luis) — superseded by §23.** The new owner
+now gets an inbox message and `lead.reassigned` is emitted. Original decision: a
+reassigned agent is **not notified**. No event, no push, no auto-task: the lead appears on their board and
 `assignment_audit` records who moved it and when. Same reasoning as §19's
 reminders — nothing today would deliver a notification.
 
@@ -652,3 +653,52 @@ UPDATE statements, so the test cannot drift from what is applied.
 
 **Revisit if** a non-agent principal (a webhook integration) starts emitting
 events — then the actor needs a kind, not just an agent id.
+
+---
+
+## 23. The in-app inbox is its own table, written with the change (014_notifications.sql)
+
+**Decision.** When the AI agent or a `TEAM_ADMIN` hands an agent work, that agent
+gets a message in the CRM: `LEAD_ASSIGNED` when the bot (or an admin) creates a
+lead on their listing or an admin reassigns one to them, `VISIT_SCHEDULED` when
+either books a visit on their calendar. One `core.notification` row per message
+per recipient, with `read_at` as the read flag. `services/notification.notify`
+stages it in the caller's transaction, like `events.emit`, so the message exists
+iff the lead or visit does. Agents read `GET /me/notifications` (20 per page) and
+mark messages read; admins read `GET /notifications`, the whole agency, filtered
+by recipient, actor, bot/admin, type, read state, lead and day, and viewing it
+marks nothing read. Frontend guide: `docs/NOTIFICATIONS.md`.
+
+**Only the bot and admins trigger it** (decided with Luis). An agent's own
+actions, and an ordinary agent acting on a colleague's lead or calendar, write
+nothing. Nobody is told about what they did themselves.
+
+**Why a table and not the outbox.** The outbox has no recipient, nowhere to keep
+"read", and is due a retention job (proposal §5). A reassignment has an owner
+the event payload only implies. The inbox also has to be searchable for a future
+support monitor; that wants its own indexes, not JSON filters on a log.
+
+**Ids only, no text.** Client name and address are joined in on read. A copy in
+the message would survive the one-UPDATE right-to-erasure on `pii.person`
+(rule 1). The frontend writes the sentence; `data` keeps the facts as they were
+(`via`, `from_agent_id`, the visit's booked status and time), while `visit_*` in
+the response is the visit as it is now.
+
+**No `event_id`.** The message and its event share a transaction, so
+`created_at = occurred_at` and `lead_id`/`appointment_id = aggregate_id` — the
+match 013's backfill already relies on. Storing the id would cost a flush per
+write.
+
+**No email** (decided with Luis): the people who get these are already in the
+CRM, and email would need a provider and a real domain (Render's free tier also
+blocks SMTP). **Polling, not Realtime:** the frontend asks every 60 s; the inbox
+goes through the API's agency filter like everything else.
+
+**Left out:** per-agency switches for what gets sent (option B with Luis — needs
+an agency-settings store), rescheduled/cancelled visits, the previous owner on a
+reassignment, a cross-agency support view (needs a platform-operator role; the
+`(agency_id, id)` index is ready), text search, retention.
+
+**Revisit if** an agency wants to mute a type (add settings), messages pile up
+past ~1M rows (retention), or a client-facing channel is needed (that is the
+bot's job, not the inbox's).

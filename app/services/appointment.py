@@ -38,7 +38,7 @@ from app.config import get_settings
 from app.deps import has_scope
 from app.models import Agent, Appointment, Interaction, Lead, Objection, VisitFeedback
 from app.schemas import TERMINAL_STAGES
-from app.services import calendar_import, events
+from app.services import calendar_import, events, notification
 from app.services.lead import get_lead, insert_transition
 
 # COMPLETED/NO_SHOW are outcomes recorded after the fact; CONFIRMED/RESCHEDULED/
@@ -330,6 +330,14 @@ async def request_visit(
         note=(f"Visit {'booked' if confirmed else 'requested'} for "
               f"{_local(scheduled_at)} ({duration_min} min)"
               + ("" if confirmed else " — awaiting the agent's confirmation")),
+    )
+    # Inbox: only when the bot or an admin booked it on someone else's calendar.
+    notification.notify(
+        session, type="VISIT_SCHEDULED", agency_id=agent.agency_id,
+        recipient_id=lead.agent_id, actor=agent, lead_id=lead_id,
+        appointment_id=appointment.id,
+        data={"scheduled_at": scheduled_at.isoformat(), "duration_min": duration_min,
+              "status": appointment.status},
     )
     await session.commit()
     await session.refresh(appointment)

@@ -41,8 +41,8 @@ Target metrics (from the backlog):
   so re-running wipes and recreates. Paste into Supabase SQL Editor and Run.
   Click "Run without RLS" on the warning popup. Run `scripts/verify_db.py` first —
   if the live schema has drifted, this file will silently destroy it.
-- `migrations/` — `001_schema.sql` (the baseline) then `002`–`013` (additive,
-  idempotent). `schema-2.sql` is kept equal to 001 + … + 013 (folded in place,
+- `migrations/` — `001_schema.sql` (the baseline) then `002`–`014` (additive,
+  idempotent). `schema-2.sql` is kept equal to 001 + … + 014 (folded in place,
   not appended — diff the catalogs of both on a throwaway DB to check).
 - `render.yaml` — free Render deploy. `scripts/provision_agent_users.py` — one
   Auth login per real agent (Admin API), replaces hand-made users.
@@ -51,18 +51,19 @@ Target metrics (from the backlog):
 - `app/` — the FastAPI service. `README.md` covers setup and the EC2 runbook;
   `docs/DECISIONS.md` records the structural choices and why.
 
-## Schema (26 tables, 4 schemas)
+## Schema (27 tables, 4 schemas)
 
 **`pii`** — `person`. Every human lives here exactly once. `telegram_user_id`
 (`008`, UNIQUE) is how a returning Telegram contact is recognised.
 
-**`core`** (24) — `agency`, `agent`, `owner`, `client`, `property`, `listing`,
+**`core`** (25) — `agency`, `agent`, `owner`, `client`, `property`, `listing`,
 `lead`, `lead_stage`, `lead_stage_transition`, `lost_reason`, `lead_lost_detail`,
 `interaction`, `appointment`, `objection`, `visit_feedback`, `follow_up_task`,
 `assignment_audit`, `offer`, `deal`, `agent_availability`, `agent_time_off`
 (`003`), `service_account` (`007` — the credential behind an AI agent),
 `agent_external_calendar` (`009` — an agent's own calendar, read for busy time),
-`agent_invite` (`012` — the only way to sign up)
+`agent_invite` (`012` — the only way to sign up), `notification` (`014` — the
+in-app inbox)
 
 **`events`** — `property_view` (append-only, one row per listing page view)
 
@@ -123,7 +124,7 @@ exclusively, never from `core` — which is why **every** one of the five expose
   AI agents always. See `docs/DECISIONS.md` §11 and §19.
 
 Also deferred, additive if needed: `listing_price_history`, `message_template`,
-`notification`, `search_event`.
+`search_event`.
 
 ## The seeder
 
@@ -260,8 +261,9 @@ never PII.
 A LOST transition writes `lead_lost_detail` **and** a `Lost: <reason>` STATUS_CHANGE
 timeline line. `GET /leads?active=true` is the working board (hides WON and LOST;
 default unchanged, so the bot is unaffected). `GET /analytics/lost-reasons` reads
-`analytics.lead_outcome.lost_reason`. Reassignment notifies no one — HU-08 AC2
-is cut by decision (`docs/DECISIONS.md` §20).
+`analytics.lead_outcome.lost_reason`. Reassignment now emits `lead.reassigned`
+and puts a message in the new owner's inbox (HU-08 AC2, see the inbox below; it
+was cut in §20).
 
 ### The lead board (HU-06)
 
@@ -284,10 +286,24 @@ choose neither. Row lock ⇒ one token, one agent. The API now holds
 routes are the explicit `PUBLIC_WRITE_ROUTES` in `tests/test_route_scopes.py`.
 `docs/DECISIONS.md` §21.
 
+### The inbox (014)
+
+`core.notification`: one message per recipient, written by
+`services/notification.notify` in the caller's transaction (like `events.emit`).
+**Only the bot or a TEAM_ADMIN triggers one, never for yourself:** `LEAD_ASSIGNED`
+(the bot creates a lead on your listing, or an admin reassigns one to you) and
+`VISIT_SCHEDULED` (either books a visit on your lead). An ordinary agent's
+actions notify no one. Rows hold ids only — names are joined on read, so
+erasure still works. `GET /me/notifications` (20 per page, `read_at` is the read
+flag, `unread_count` is the badge) + `POST .../{id}/read`, `.../read-all`;
+`GET /notifications` is the TEAM_ADMIN monitor (filters, never marks read). No
+email, no Realtime — the frontend polls. `docs/NOTIFICATIONS.md` is the frontend
+guide; `docs/DECISIONS.md` §23.
+
 ### Local one-command dev
 
 `docker compose --profile local up --build` — throwaway `postgres:17-alpine`,
-`migrations/*.sql` auto-applied on first boot (001→010), one-shot `seed`
+`migrations/*.sql` auto-applied on first boot (001→014), one-shot `seed`
 (`--scale small --seed 42`), API with `DEV_AUTH_BYPASS=true` (identity from
 `X-Dev-Agent-Id`; the app refuses to start with the bypass on against a
 non-local DB). No `.env`, no Supabase.

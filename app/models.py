@@ -337,6 +337,33 @@ class AssignmentAudit(Base):
     reassigned_at: Mapped[datetime] = _ts(server_default=func.now())
 
 
+class Notification(Base):
+    """014. The in-app inbox: one row per message per recipient, written in the
+    transaction that assigned the lead or booked the visit. Ids only — names and
+    addresses are joined in on read (services/notification.py)."""
+    __tablename__ = "notification"
+    __table_args__ = {"schema": "core"}
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    agency_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("core.agency.id"), nullable=False)
+    recipient_agent_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("core.agent.id", ondelete="CASCADE"), nullable=False
+    )
+    type: Mapped[str] = mapped_column(Text, nullable=False)
+    lead_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("core.lead.id", ondelete="CASCADE"), nullable=False
+    )
+    appointment_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("core.appointment.id", ondelete="CASCADE")
+    )
+    actor_agent_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("core.agent.id", ondelete="SET NULL")
+    )
+    data: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
+    created_at: Mapped[datetime] = _ts(server_default=func.now())
+    read_at: Mapped[datetime | None] = _ts()
+
+
 class Offer(Base):
     __tablename__ = "offer"
     __table_args__ = {"schema": "core"}
