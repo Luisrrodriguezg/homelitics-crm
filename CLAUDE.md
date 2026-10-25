@@ -321,8 +321,8 @@ default Mon–Fri availability for the 48 agents) — the exact SQL is in the
 session's `phase0_cleanup.sql`; `scripts/purge_test_rows.sql` is the reusable part.
 `tests/conftest.py` now refuses a non-local `DATABASE_URL` so debris cannot recur.
 
-Migrations `001`–`013` are applied to the live DB; `scripts/verify_db.py` is green
-(38/38 since 013). `007` went on 2026-09-10 via the Supabase connector's `apply_migration`;
+Migrations `001`–`014` are applied to the live DB; `scripts/verify_db.py` is green
+(38/38 since 014). `007` went on 2026-09-10 via the Supabase connector's `apply_migration`;
 its new response definition moved 96 leads to `never_answered` (the 72h sweep's
 auto-note had been counting as their first response). Ground truth held: slow
 28.8h vs fast 2.0h.
@@ -345,6 +345,10 @@ their code merged. 013's backfill set the actor on 31 of 394 events (15
 `appointment.*` from the payload, 16 lead events matched on their transition);
 the 346 `lead.went_cold` stay NULL (system). `verify_db.py` 38/38, ground truth
 unchanged.
+`014` (the inbox) went on 2026-10-25 with `scripts/apply_migrations.py
+014_notifications.sql`, before PR #28 merged: one new empty table + 3 indexes, no
+row changed (9,409 leads, 3,074 appointments before and after), no new grants.
+`verify_db.py` 38/38; Render redeployed and `/health` reported schema ok.
 Worktrees have no `.env`; scripts use the main checkout's
 `/Users/luisrro/Desktop/Proyecto Home/.env`.
 
