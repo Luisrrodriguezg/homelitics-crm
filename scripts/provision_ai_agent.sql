@@ -2,6 +2,9 @@
 -- provision_ai_agent.sql — create (or repair) one AI-agent service
 -- account and its per-agency AI_AGENT rows.
 --
+-- This makes a SHARED bot that can reach every agency. For a bot confined
+-- to one agency (what the agency bots use), run provision_agency_bots.sql.
+--
 -- Prerequisite: migrations/007_ai_agents.sql applied, and a Supabase Auth
 -- user for the bot created in the dashboard:
 --   Authentication -> Users -> Add user -> "Create new user",

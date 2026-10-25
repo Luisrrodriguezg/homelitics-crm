@@ -207,8 +207,11 @@ attributed (`changed_by`/`created_by`) — that is what the hourly budget counts
 (`schemas.RESPONSE_TYPES`; same predicate in `007` for the two views and the
 sweep) — notes, stage-change notes, the sweep's auto-note and anything a bot
 writes never stop the response clock. Provision with
-`scripts/provision_ai_agent.sql` (re-run after every re-seed);
-`provision_agent_users.py` skips `AI_AGENT` rows.
+`scripts/provision_agency_bots.sql` — one account per agency, rows in that
+agency only, so a wrong `X-Agency-Id` is a 403 (the demo bot is
+`ai-ramirez-plc`, `docs/DEMO_AGENCY.md`). `scripts/provision_ai_agent.sql` makes
+the older shared `ai-agent`, reachable from every agency — being retired.
+Re-run both after every re-seed; `provision_agent_users.py` skips `AI_AGENT` rows.
 
 ### Client registration (008)
 
@@ -331,6 +334,10 @@ Worktrees have no `.env`; scripts use the main checkout's
 
 The AI agent is provisioned: service account `ai-agent` exists with an
 `AI_AGENT` row in all 6 agencies, and the service-account code is on `main`.
+On 2026-10-25 `provision_agency_bots.sql` created `ai-ramirez-plc`
+(`bot@ramirez-plc.homelitics.test`, one row, Ramírez only) for the AI team's
+demo; the other five agency logins don't exist yet. `ai-agent` stays active
+until the AI team confirms the switch, then `active = false`. `verify_db.py` 38/38.
 
 ### Outstanding
 
